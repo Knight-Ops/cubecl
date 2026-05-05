@@ -25,6 +25,7 @@ default = [
     "cubecl-cpu?/default",
     "cubecl-hip?/default",
     "cubecl-wgpu?/default",
+    "cubecl-ttmetal?/std",
 ]
 exclusive-memory-only = ["cubecl-wgpu?/exclusive-memory-only"]
 std = ["cubecl-core/std", "cubecl-wgpu?/std", "cubecl-cuda?/std"]
@@ -47,6 +48,7 @@ cuda = ["cubecl-cuda"]
 cuda-ptx-wmma = ["cubecl-cuda?/ptx-wmma"]
 hip = ["cubecl-hip"]
 hip-rocwmma = ["cubecl-hip?/rocwmma"]
+ttmetal = ["cubecl-ttmetal"]
 metal = ["wgpu-msl"]
 rocm = ["hip"]
 spirv-dump = ["cubecl-wgpu/spirv-dump"]
@@ -67,5 +69,6 @@ cubecl-hip = { path = "../cubecl-hip", version = "=0.10.0-pre.4", default-featur
 cubecl-ir = { path = "../cubecl-ir", version = "=0.10.0-pre.4", default-features = false }
 cubecl-runtime = { path = "../cubecl-runtime", version = "=0.10.0-pre.4", default-features = false }
 cubecl-std = { path = "../cubecl-std", version = "=0.10.0-pre.4", optional = true }
+cubecl-ttmetal = { path = "../cubecl-ttmetal", version = "=0.10.0-pre.4", default-features = false, optional = true }
 cubecl-wgpu = { path = "../cubecl-wgpu", version = "=0.10.0-pre.4", default-features = false, optional = true }
 half = { workspace = true }

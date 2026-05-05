@@ -1,0 +1,38 @@
+[package]
+authors = ["OpenAI"]
+categories = ["science"]
+description = "TT-Metalium backend scaffolding for CubeCL"
+edition.workspace = true
+keywords = ["tt-metalium", "tenstorrent", "gpu", "backend"]
+license.workspace = true
+name = "cubecl-ttmetal"
+readme = "README.md"
+repository = "https://github.com/tracel-ai/cubecl/tree/main/crates/cubecl-ttmetal"
+version.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+default = [
+    "std",
+    "cubecl-runtime/default",
+    "cubecl-core/default",
+]
+std = [
+    "cubecl-runtime/std",
+    "cubecl-runtime/channel-mutex",
+    "cubecl-runtime/storage-bytes",
+    "cubecl-core/std",
+]
+
+[dependencies]
+cubecl-cpp = { path = "../cubecl-cpp", version = "=0.10.0-pre.4", default-features = false, features = [
+    "metal",
+] }
+cubecl-core = { path = "../cubecl-core", version = "=0.10.0-pre.4", default-features = false }
+cubecl-ir = { path = "../cubecl-ir", version = "=0.10.0-pre.4", default-features = false }
+cubecl-runtime = { path = "../cubecl-runtime", version = "=0.10.0-pre.4", default-features = false }
+
+[dev-dependencies]
+cubecl-ir = { path = "../cubecl-ir", version = "=0.10.0-pre.4", default-features = false }
