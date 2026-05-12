@@ -152,6 +152,9 @@ wgpu = "29"
 # Build deps
 cfg_aliases = "0.2.1"
 
+# CubeCL TT-Metal
+libtt-metal-cxx = { path = "../libtt-metal-cxx" }
+
 
 [profile.dev.build-override]
 opt-level = 3

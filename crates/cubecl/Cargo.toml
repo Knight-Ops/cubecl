@@ -24,6 +24,7 @@ default = [
     "cubecl-cuda?/default",
     "cubecl-cpu?/default",
     "cubecl-hip?/default",
+    "cubecl-tt-metal?/default",
     "cubecl-wgpu?/default",
 ]
 exclusive-memory-only = ["cubecl-wgpu?/exclusive-memory-only"]
@@ -38,6 +39,7 @@ tracing = [
     "cubecl-cuda?/tracing",
     "cubecl-cpu?/tracing",
     "cubecl-hip?/tracing",
+    "cubecl-tt-metal?/tracing",
     "cubecl-wgpu?/tracing",
 ]
 
@@ -50,6 +52,7 @@ hip-rocwmma = ["cubecl-hip?/rocwmma"]
 metal = ["wgpu-msl"]
 rocm = ["hip"]
 spirv-dump = ["cubecl-wgpu/spirv-dump"]
+tt_metal = ["cubecl-tt-metal"]
 vulkan = ["wgpu-spirv"]
 webgpu = ["wgpu"]
 wgpu = ["cubecl-wgpu"]
@@ -67,5 +70,6 @@ cubecl-hip = { path = "../cubecl-hip", version = "=0.11.0-pre.1", default-featur
 cubecl-ir = { path = "../cubecl-ir", version = "=0.11.0-pre.1", default-features = false }
 cubecl-runtime = { path = "../cubecl-runtime", version = "=0.11.0-pre.1", default-features = false }
 cubecl-std = { path = "../cubecl-std", version = "=0.11.0-pre.1", optional = true }
+cubecl-tt-metal = { path = "../cubecl-tt-metal", version = "=0.11.0-pre.1", default-features = false, optional = true }
 cubecl-wgpu = { path = "../cubecl-wgpu", version = "=0.11.0-pre.1", default-features = false, optional = true }
 half = { workspace = true }
