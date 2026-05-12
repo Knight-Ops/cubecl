@@ -22,7 +22,7 @@ mod tests {
     };
     use std::env;
 
-    pub type TestRuntime = crate::TtRuntime;
+    pub type TestRuntime = crate::runtime::TtRuntime;
 
     // NOTE: testgen!() macros are disabled for now — they require a working
     // IR pipeline which will be implemented in Phase 4+.
@@ -33,38 +33,114 @@ mod tests {
         env::var_os("TT_METAL_RUN_HARDWARE_TESTS").is_some()
     }
 
+    // ── Standalone tilization test (no GPU needed) ────────────────────────
+
     #[test]
-    fn copy_tile_round_trip() {
+    fn tilize_untilize_round_trip() {
+        const M: u32 = 64;
+        const N: u32 = 64;
+        const ELEM_SIZE: u32 = 2;
+        let num_elements = (M * N) as usize;
+
+        let mut input = vec![0u16; num_elements];
+        for r in 0..M as usize {
+            for c in 0..N as usize {
+                input[r * N as usize + c] = 0x3E00u16 | ((r * N as usize + c) as u16 & 0xFF);
+            }
+        }
+
+        let bytes = bytemuck::cast_slice(&input);
+        let tilized =
+            libtt_metal_cxx::tilize(bytes, M, N, ELEM_SIZE).expect("tilize should succeed");
+        assert_eq!(
+            tilized.len(),
+            bytes.len(),
+            "tilized size should match input for tile-aligned dims"
+        );
+
+        let untilized =
+            libtt_metal_cxx::untilize(&tilized, M, N, ELEM_SIZE).expect("untilize should succeed");
+        let output: &[u16] = bytemuck::cast_slice(&untilized);
+        assert_eq!(
+            input, output,
+            "tilize/untilize round-trip should preserve data"
+        );
+    }
+
+    // ── Raw buffer I/O test ───────────────────────────────────────────────
+
+    #[test]
+    fn buffer_write_read_round_trip() {
         if !hardware_tests_enabled() {
             return;
         }
+        let mut mesh = MeshDevice::create_unit_mesh(0).expect("should open unit mesh");
+        const BUF_SIZE: u64 = 4096;
+        let buf = MeshBuffer::create_replicated(&mesh, BUF_SIZE, BUF_SIZE, 0)
+            .expect("buffer should allocate");
 
+        let mut input = vec![0u8; BUF_SIZE as usize];
+        for i in 0..BUF_SIZE as usize {
+            input[i] = (i % 251 + 1) as u8;
+        }
+        mesh.write_mesh_buffer(&buf, &input).expect("write");
+        let mut output = vec![0u8; BUF_SIZE as usize];
+        mesh.read_mesh_buffer(&buf, &mut output).expect("read");
+        assert_eq!(input, output, "raw buffer write/read round-trip");
+        assert!(mesh.close().expect("mesh should close"));
+    }
+
+    // ── Kernel compile + execute test (data round-trip NOT verified) ──────
+    //
+    // KNOWN ISSUE: Data round-trip through kernels produces uniform 0xBF80
+    // (bf16 -1.0) regardless of input. This occurs because noc_async_read_tile
+    // (using TensorAccessor) addresses interleaved DRAM differently from
+    // EnqueueWriteMeshBuffer. The readback of the input buffer via
+    // read_mesh_buffer confirms data IS written correctly (0 mismatches).
+    // The kernels compile and execute without error (JIT cache 8/8 hits).
+    // Debugging the TensorAccessor address computation vs write_mesh_buffer
+    // address mapping requires deeper TT-Metal DRAM interleaving investigation.
+    // See TODO.md for details.
+
+    #[test]
+    fn kernel_compile_and_execute() {
+        if !hardware_tests_enabled() {
+            return;
+        }
         let mut mesh = MeshDevice::create_unit_mesh(0).expect("should open unit mesh");
 
-        const TILE_SIZE: u32 = 32 * 32 * 2; // 32x32 bfloat16 = 2048 bytes
+        const TILE_SIZE: u32 = 32 * 32 * 2;
         const NUM_TILES: u32 = 2;
         const BUF_SIZE: u64 = NUM_TILES as u64 * TILE_SIZE as u64;
 
-        // Allocate input and output buffers
         let input_buf = MeshBuffer::create_replicated(&mesh, BUF_SIZE, TILE_SIZE as u64, 0)
             .expect("input buffer should allocate");
         let output_buf = MeshBuffer::create_replicated(&mesh, BUF_SIZE, TILE_SIZE as u64, 0)
             .expect("output buffer should allocate");
 
-        // Write known data pattern to input
-        let input_data = vec![0u8; BUF_SIZE as usize];
-        mesh.write_mesh_buffer(&input_buf, &input_data)
-            .expect("input write should succeed");
+        // Write test pattern and verify it's in DRAM
+        let num_u16 = BUF_SIZE as usize / 2;
+        let mut input = vec![0u16; num_u16];
+        for i in 0..num_u16 {
+            input[i] = 0x3E00u16 | (i as u16 & 0xFF);
+        }
+        mesh.write_mesh_buffer(&input_buf, bytemuck::cast_slice(&input))
+            .expect("input write");
+        let mut verify = vec![0u8; BUF_SIZE as usize];
+        mesh.read_mesh_buffer(&input_buf, &mut verify)
+            .expect("verify read");
+        let verify_u16: &[u16] = bytemuck::cast_slice(&verify);
+        assert_eq!(
+            input.as_slice(),
+            verify_u16,
+            "input data written correctly to DRAM"
+        );
 
-        // Generate kernel sources (copy kernel: in → out tile-by-tile)
+        // Build and launch kernel
         let sources = TtKernelSources::copy_kernel(NUM_TILES, TILE_SIZE);
-
-        // Build the Program
         let core = LogicalCore::new(0, 0);
         let core_range = CoreRangeSet::from_core(core);
         let mut program = Program::new();
-
-        // Configure circular buffers (double-buffered)
         let cb_tiles = 2u32;
         let cb_size = cb_tiles * TILE_SIZE;
 
@@ -75,8 +151,7 @@ mod tests {
             .set_page_size(TILE_SIZE);
         program
             .create_circular_buffer(&core_range, &cb_in_config)
-            .expect("input CB should create");
-
+            .expect("input CB");
         let mut cb_out_config = CircularBufferConfig::new(cb_size);
         cb_out_config
             .index(16)
@@ -84,40 +159,34 @@ mod tests {
             .set_page_size(TILE_SIZE);
         program
             .create_circular_buffer(&core_range, &cb_out_config)
-            .expect("output CB should create");
+            .expect("output CB");
 
-        // Pass compile-time args for TensorAccessorArgs
-        // ArgConfig: IsDram=2 (non-sharded DRAM), AlignedPageSize=tile_size
-        let mut reader_config =
-            DataMovementKernelConfig::reader().expect("reader config should create");
+        let mut reader_config = DataMovementKernelConfig::reader().expect("reader config");
         reader_config
             .set_processor(DataMovementProcessor::Riscv1)
             .set_opt_level(KernelBuildOptLevel::O3);
-        reader_config.add_compile_arg(2); // IsDram
-        reader_config.add_compile_arg(TILE_SIZE); // AlignedPageSize
+        reader_config.add_compile_arg(2);
+        reader_config.add_compile_arg(TILE_SIZE);
         let reader_id = program
             .create_data_movement_kernel_from_string_with_config(
                 &sources.reader_source,
                 core,
                 &reader_config,
             )
-            .expect("reader kernel should compile");
-
-        let mut writer_config =
-            DataMovementKernelConfig::writer().expect("writer config should create");
+            .expect("reader");
+        let mut writer_config = DataMovementKernelConfig::writer().expect("writer config");
         writer_config
             .set_processor(DataMovementProcessor::Riscv0)
             .set_opt_level(KernelBuildOptLevel::O3);
-        writer_config.add_compile_arg(2); // IsDram
-        writer_config.add_compile_arg(TILE_SIZE); // AlignedPageSize
+        writer_config.add_compile_arg(2);
+        writer_config.add_compile_arg(TILE_SIZE);
         let writer_id = program
             .create_data_movement_kernel_from_string_with_config(
                 &sources.writer_source,
                 core,
                 &writer_config,
             )
-            .expect("writer kernel should compile");
-
+            .expect("writer");
         let mut compute_config = ComputeKernelConfig::new();
         compute_config
             .set_math_fidelity(MathFidelity::HiFi4)
@@ -128,33 +197,23 @@ mod tests {
                 core,
                 &compute_config,
             )
-            .expect("compute kernel should compile");
+            .expect("compute");
 
-        // Set runtime args
         program
             .set_runtime_args(reader_id, core, &[input_buf.address(), NUM_TILES])
-            .expect("reader runtime args should set");
+            .expect("reader args");
         program
             .set_runtime_args(writer_id, core, &[output_buf.address(), NUM_TILES])
-            .expect("writer runtime args should set");
+            .expect("writer args");
         program
             .set_runtime_args(compute_id, core, &[NUM_TILES])
-            .expect("compute runtime args should set");
+            .expect("compute args");
 
-        // Enqueue and execute
         let mut workload = MeshWorkload::new();
         workload
             .add_program_to_full_mesh(&mesh, program)
-            .expect("workload should accept program");
-        mesh.enqueue_workload(&mut workload, true)
-            .expect("workload should enqueue");
-
-        // Verify the workload executed without error
-        // NOTE: Data verification is skipped because TT-Metal requires
-        // tilized data format (tilize_nfaces/untilize_nfaces) for tile
-        // operations. Raw byte data in row-major format won't round-trip
-        // correctly through tile-based compute. Proper tilization support
-        // is planned for a follow-up phase.
+            .expect("workload");
+        mesh.enqueue_workload(&mut workload, true).expect("enqueue");
 
         assert!(mesh.close().expect("mesh should close"));
     }

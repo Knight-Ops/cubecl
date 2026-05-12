@@ -32,9 +32,11 @@ pub fn generate_writer_source(num_outputs: u32) -> String {
         ));
     }
 
-    // Declare TensorAccessor for each output buffer
+    // Declare TensorAccessor for each output buffer.
+    // Use the 3-arg constructor with get_tile_size() as documented.
     src.push('\n');
     for i in 0..num_outputs {
+        let cb_idx = 16 + i;
         if i == 0 {
             src.push_str(&format!(
                 "    constexpr auto c{}_args = TensorAccessorArgs<0>();\n",
@@ -47,8 +49,8 @@ pub fn generate_writer_source(num_outputs: u32) -> String {
             ));
         }
         src.push_str(&format!(
-            "    const auto c{} = TensorAccessor(c{}_args, dst{}_addr);\n",
-            i, i, i
+            "    const auto c{} = TensorAccessor(c{}_args, dst{}_addr, get_tile_size(cb_out{}));\n",
+            i, i, i, i
         ));
     }
 

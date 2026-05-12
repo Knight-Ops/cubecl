@@ -28,8 +28,10 @@ pub fn generate_reader_source(num_inputs: u32) -> String {
         src.push_str(&format!("    constexpr uint32_t cb_in{} = {};\n", i, i));
     }
 
-    // Declare TensorAccessor for each input buffer
-    // Each uses 2 compile-time args: [ArgConfig, AlignedPageSize]
+    // Declare TensorAccessor for each input buffer.
+    // Use the 3-arg constructor with get_tile_size() as documented in
+    // TT-Metal's interleaved memory guide. This matches the pattern:
+    //   TensorAccessor(args, addr, get_tile_size(cb_id));
     src.push('\n');
     for i in 0..num_inputs {
         if i == 0 {
@@ -44,8 +46,8 @@ pub fn generate_reader_source(num_inputs: u32) -> String {
             ));
         }
         src.push_str(&format!(
-            "    const auto a{} = TensorAccessor(a{}_args, src{}_addr);\n",
-            i, i, i
+            "    const auto a{} = TensorAccessor(a{}_args, src{}_addr, get_tile_size(cb_in{}));\n",
+            i, i, i, i
         ));
     }
 

@@ -2,6 +2,6 @@
 3: /home/carl/.cache/tt-metal-cache/7480443082328483327/kernels/cq_dispatch_subordinate/7227152901424362888//ncrisc/ncrisc.elf
 2: /home/carl/.cache/tt-metal-cache/7480443082328483327/kernels/cq_dispatch/304047669242341916//brisc/brisc.elf
 1: /home/carl/.cache/tt-metal-cache/7480443082328483327/kernels/cq_prefetch/11681118040740904905//brisc/brisc.elf
-4: /home/carl/.cache/tt-metal-cache/7480443082328483327/kernels/Kernel_Source_Code/16758054711357524778//ncrisc/ncrisc.elf
+4: /home/carl/.cache/tt-metal-cache/7480443082328483327/kernels/Kernel_Source_Code/7436816753601447961//ncrisc/ncrisc.elf
 6: /home/carl/.cache/tt-metal-cache/7480443082328483327/kernels/Kernel_Source_Code/14555975090903533895//trisc0/trisc0.elf:/home/carl/.cache/tt-metal-cache/7480443082328483327/kernels/Kernel_Source_Code/14555975090903533895//trisc1/trisc1.elf:/home/carl/.cache/tt-metal-cache/7480443082328483327/kernels/Kernel_Source_Code/14555975090903533895//trisc2/trisc2.elf
-5: /home/carl/.cache/tt-metal-cache/7480443082328483327/kernels/Kernel_Source_Code/7925606904958390550//brisc/brisc.elf
+5: /home/carl/.cache/tt-metal-cache/7480443082328483327/kernels/Kernel_Source_Code/800219549711675394//brisc/brisc.elf
