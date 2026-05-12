@@ -9,19 +9,17 @@ use cubecl_core::{
     MemoryConfiguration, Runtime,
     device::{DeviceId, ServerUtilitiesHandle},
     ir::{
-        DeviceProperties, HardwareProperties, MatrixLayout, MemoryDeviceProperties,
-        MmaProperties, TargetProperties, VectorSize, features::Plane,
+        DeviceProperties, HardwareProperties, MatrixLayout, MemoryDeviceProperties, MmaProperties,
+        TargetProperties, VectorSize, features::Plane,
     },
     server::ServerUtilities,
     zspace::{Shape, Strides, striding::has_pitched_row_major_strides},
 };
 use cubecl_cpp::{
-    shared::{
-        Architecture, CompilationOptions, CppCompiler, CppSupportedFeatures,
-    },
-    tt_metal::TtMetalDialect,
     register_supported_types,
     shared::register_wmma_features,
+    shared::{Architecture, CompilationOptions, CppCompiler, CppSupportedFeatures},
+    tt_metal::TtMetalDialect,
 };
 use cubecl_runtime::{
     allocator::ContiguousMemoryLayoutPolicy, client::ComputeClient, logging::ServerLogger,
@@ -52,8 +50,6 @@ impl DeviceService for TtServer {
     fn init(device_id: cubecl_common::device::DeviceId) -> Self {
         let device = TtDevice::from_id(device_id);
 
-        // Attempt to open the device for querying properties.
-        // For TT-Metal, we open a unit mesh.
         let mesh = match libtt_metal_cxx::MeshDevice::create_unit_mesh(device.index as i32) {
             Ok(m) => m,
             Err(e) => panic!("Failed to open TT device {}: {}", device.index, e.what()),
@@ -70,9 +66,9 @@ impl DeviceService for TtServer {
             plane_size_min: warp_size,
             plane_size_max: warp_size,
             max_bindings: TT_MAX_BINDINGS,
-            max_shared_memory_size: 1_500_000, // ~1.5MB L1 per core
+            max_shared_memory_size: 1_500_000,
             max_cube_count: (num_cores, 1, 1),
-            max_units_per_cube: warp_size * TILE_HEIGHT, // per-core parallelism
+            max_units_per_cube: warp_size * TILE_HEIGHT,
             max_cube_dim: (u32::MAX, 1, 1),
             num_streaming_multiprocessors: Some(num_cores as u32),
             num_tensor_cores: None,
@@ -82,7 +78,7 @@ impl DeviceService for TtServer {
         };
 
         let mem_properties = MemoryDeviceProperties {
-            max_page_size: 16 * 1024 * 1024, // 16MB DRAM per core approx
+            max_page_size: 16 * 1024 * 1024,
             alignment: 32,
         };
 
@@ -106,13 +102,13 @@ impl DeviceService for TtServer {
             },
         };
 
-        let ctx = TtContext::new(mesh, comp_opts, device_props.clone());
+        let ctx = TtContext::new(comp_opts, device_props.clone());
         let logger = Arc::new(ServerLogger::default());
         let policy = ContiguousMemoryLayoutPolicy::new(device_props.memory.alignment as usize);
         let utilities = ServerUtilities::new(device_props, logger, (), policy);
         let options = RuntimeOptions::default();
 
-        TtServer::new(ctx, mem_properties, options.memory_config, utilities)
+        TtServer::new(mesh, ctx, mem_properties, options.memory_config, utilities)
     }
 
     fn utilities(&self) -> ServerUtilitiesHandle {
@@ -169,8 +165,6 @@ impl Runtime for TtRuntime {
         _: &<Self::Server as cubecl_core::server::ComputeServer>::Info,
     ) -> Vec<DeviceId> {
         let count = libtt_metal_cxx::available_device_count().unwrap_or(0);
-        (0..count)
-            .map(|i| DeviceId::new(0, i as u16))
-            .collect()
+        (0..count).map(|i| DeviceId::new(0, i as u16)).collect()
     }
 }

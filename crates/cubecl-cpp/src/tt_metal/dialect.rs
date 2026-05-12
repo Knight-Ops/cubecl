@@ -5,15 +5,14 @@ use std::marker::PhantomData;
 
 use cubecl_core::ir::Processor;
 
-use crate::shared::{
-    self, Component, DialectBindings, DialectCubeBuiltins, DialectIncludes,
-    DialectInstructions, DialectProcessors, DialectTypes, DialectWarpReduceCompiler,
-    DialectWmmaCompiler, Elem, Flags, Fragment, FragmentIdent, FragmentLayout, Item, KernelArg,
-    ManualMma, SupportedMmaCombinations, SupportedScaledMmaCombinations, Variable, WarpInstruction,
-    WmmaInstruction,
-};
 use crate::Dialect;
 use crate::shared::Instruction;
+use crate::shared::{
+    self, Component, DialectBindings, DialectCubeBuiltins, DialectIncludes, DialectInstructions,
+    DialectProcessors, DialectTypes, DialectWarpReduceCompiler, DialectWmmaCompiler, Elem, Flags,
+    Fragment, FragmentIdent, FragmentLayout, Item, KernelArg, ManualMma, SupportedMmaCombinations,
+    SupportedScaledMmaCombinations, Variable, WarpInstruction, WmmaInstruction,
+};
 
 use super::arch::TtArchitecture;
 
@@ -49,7 +48,10 @@ impl<Wmma: DialectWmmaCompiler<Self>> DialectIncludes<Self> for TtMetalDialect<W
         )
     }
 
-    fn compile_extensions(_f: &mut fmt::Formatter<'_>, _extensions: &[Self::Extension]) -> fmt::Result {
+    fn compile_extensions(
+        _f: &mut fmt::Formatter<'_>,
+        _extensions: &[Self::Extension],
+    ) -> fmt::Result {
         Ok(())
     }
 
@@ -141,45 +143,111 @@ impl<Wmma: DialectWmmaCompiler<Self>> DialectBindings<Self> for TtMetalDialect<W
 // These are mapped to loop variables and compile-time constants.
 
 impl<Wmma: DialectWmmaCompiler<Self>> DialectCubeBuiltins<Self> for TtMetalDialect<Wmma> {
-    fn compile_absolute_pos_base_name(f: &mut fmt::Formatter<'_>) -> fmt::Result { write!(f, "absolute_pos") }
-    fn compile_absolute_pos(f: &mut fmt::Formatter<'_>) -> fmt::Result { write!(f, "absolute_pos") }
-    fn compile_absolute_pos_x(f: &mut fmt::Formatter<'_>) -> fmt::Result { write!(f, "i") }
-    fn compile_absolute_pos_y(f: &mut fmt::Formatter<'_>) -> fmt::Result { write!(f, "0") }
-    fn compile_absolute_pos_z(f: &mut fmt::Formatter<'_>) -> fmt::Result { write!(f, "0") }
+    fn compile_absolute_pos_base_name(f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "absolute_pos")
+    }
+    fn compile_absolute_pos(f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "absolute_pos")
+    }
+    fn compile_absolute_pos_x(f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "i")
+    }
+    fn compile_absolute_pos_y(f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "0")
+    }
+    fn compile_absolute_pos_z(f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "0")
+    }
 
-    fn compile_cube_count_base_name(f: &mut fmt::Formatter<'_>) -> fmt::Result { write!(f, "cube_count") }
-    fn compile_cube_count(f: &mut fmt::Formatter<'_>) -> fmt::Result { write!(f, "cube_count") }
-    fn compile_cube_count_x(f: &mut fmt::Formatter<'_>) -> fmt::Result { write!(f, "1") }
-    fn compile_cube_count_y(f: &mut fmt::Formatter<'_>) -> fmt::Result { write!(f, "1") }
-    fn compile_cube_count_z(f: &mut fmt::Formatter<'_>) -> fmt::Result { write!(f, "1") }
+    fn compile_cube_count_base_name(f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "cube_count")
+    }
+    fn compile_cube_count(f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "cube_count")
+    }
+    fn compile_cube_count_x(f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "1")
+    }
+    fn compile_cube_count_y(f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "1")
+    }
+    fn compile_cube_count_z(f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "1")
+    }
 
-    fn compile_cube_dim_base_name(f: &mut fmt::Formatter<'_>) -> fmt::Result { write!(f, "cube_dim") }
-    fn compile_cube_dim(f: &mut fmt::Formatter<'_>) -> fmt::Result { write!(f, "cube_dim") }
-    fn compile_cube_dim_x(f: &mut fmt::Formatter<'_>) -> fmt::Result { write!(f, "num_tiles") }
-    fn compile_cube_dim_y(f: &mut fmt::Formatter<'_>) -> fmt::Result { write!(f, "1") }
-    fn compile_cube_dim_z(f: &mut fmt::Formatter<'_>) -> fmt::Result { write!(f, "1") }
+    fn compile_cube_dim_base_name(f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "cube_dim")
+    }
+    fn compile_cube_dim(f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "cube_dim")
+    }
+    fn compile_cube_dim_x(f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "num_tiles")
+    }
+    fn compile_cube_dim_y(f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "1")
+    }
+    fn compile_cube_dim_z(f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "1")
+    }
 
-    fn compile_cube_pos_base_name(f: &mut fmt::Formatter<'_>) -> fmt::Result { write!(f, "cube_pos") }
-    fn compile_cube_pos(f: &mut fmt::Formatter<'_>) -> fmt::Result { write!(f, "cube_pos") }
-    fn compile_cube_pos_x(f: &mut fmt::Formatter<'_>) -> fmt::Result { write!(f, "0") }
-    fn compile_cube_pos_y(f: &mut fmt::Formatter<'_>) -> fmt::Result { write!(f, "0") }
-    fn compile_cube_pos_z(f: &mut fmt::Formatter<'_>) -> fmt::Result { write!(f, "0") }
+    fn compile_cube_pos_base_name(f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "cube_pos")
+    }
+    fn compile_cube_pos(f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "cube_pos")
+    }
+    fn compile_cube_pos_x(f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "0")
+    }
+    fn compile_cube_pos_y(f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "0")
+    }
+    fn compile_cube_pos_z(f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "0")
+    }
 
-    fn compile_unit_pos_base_name(f: &mut fmt::Formatter<'_>) -> fmt::Result { write!(f, "unit_pos") }
-    fn compile_unit_pos(f: &mut fmt::Formatter<'_>) -> fmt::Result { write!(f, "unit_pos") }
-    fn compile_unit_pos_x(f: &mut fmt::Formatter<'_>) -> fmt::Result { write!(f, "i") }
-    fn compile_unit_pos_y(f: &mut fmt::Formatter<'_>) -> fmt::Result { write!(f, "0") }
-    fn compile_unit_pos_z(f: &mut fmt::Formatter<'_>) -> fmt::Result { write!(f, "0") }
+    fn compile_unit_pos_base_name(f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "unit_pos")
+    }
+    fn compile_unit_pos(f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "unit_pos")
+    }
+    fn compile_unit_pos_x(f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "i")
+    }
+    fn compile_unit_pos_y(f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "0")
+    }
+    fn compile_unit_pos_z(f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "0")
+    }
 
-    fn compile_plane_dim(f: &mut fmt::Formatter<'_>) -> fmt::Result { write!(f, "32") }
-    fn compile_plane_dim_checked(f: &mut fmt::Formatter<'_>) -> fmt::Result { write!(f, "32") }
-    fn compile_plane_pos(f: &mut fmt::Formatter<'_>) -> fmt::Result { write!(f, "0") }
-    fn compile_unit_pos_plane(f: &mut fmt::Formatter<'_>) -> fmt::Result { write!(f, "i % 32") }
+    fn compile_plane_dim(f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "32")
+    }
+    fn compile_plane_dim_checked(f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "32")
+    }
+    fn compile_plane_pos(f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "0")
+    }
+    fn compile_unit_pos_plane(f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "i % 32")
+    }
 
-    fn compile_cluster_pos(f: &mut fmt::Formatter<'_>) -> fmt::Result { write!(f, "0") }
-    fn compile_cluster_pos_x(f: &mut fmt::Formatter<'_>) -> fmt::Result { write!(f, "0") }
-    fn compile_cluster_pos_y(f: &mut fmt::Formatter<'_>) -> fmt::Result { write!(f, "0") }
-    fn compile_cluster_pos_z(f: &mut fmt::Formatter<'_>) -> fmt::Result { write!(f, "0") }
+    fn compile_cluster_pos(f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "0")
+    }
+    fn compile_cluster_pos_x(f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "0")
+    }
+    fn compile_cluster_pos_y(f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "0")
+    }
+    fn compile_cluster_pos_z(f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "0")
+    }
 }
 
 // ── Instructions ──────────────────────────────────────────────────────────
@@ -253,11 +321,7 @@ impl<Wmma: DialectWmmaCompiler<Self>> DialectInstructions<Self> for TtMetalDiale
         write!(f, "min")
     }
 
-    fn compile_warp_shuffle(
-        _f: &mut fmt::Formatter<'_>,
-        _var: &str,
-        _source: &str,
-    ) -> fmt::Result {
+    fn compile_warp_shuffle(_f: &mut fmt::Formatter<'_>, _var: &str, _source: &str) -> fmt::Result {
         unimplemented!("warp_shuffle not yet implemented for TT-Metal")
     }
 
@@ -319,25 +383,40 @@ impl<Wmma: DialectWmmaCompiler<Self>> DialectWmmaCompiler<Self> for TtMetalDiale
     fn compile_wmma_includes(f: &mut fmt::Formatter<'_>, flags: &Flags<Self>) -> fmt::Result {
         Wmma::compile_wmma_includes(f, flags)
     }
-    fn compile_wmma_type_definitions(f: &mut fmt::Formatter<'_>, flags: &Flags<Self>) -> fmt::Result {
+    fn compile_wmma_type_definitions(
+        f: &mut fmt::Formatter<'_>,
+        flags: &Flags<Self>,
+    ) -> fmt::Result {
         Wmma::compile_wmma_type_definitions(f, flags)
     }
     fn compile_wmma_local_variables(f: &mut fmt::Formatter<'_>) -> fmt::Result {
         Wmma::compile_wmma_local_variables(f)
     }
-    fn compile_wwma_fragment_ident(f: &mut fmt::Formatter<'_>, ident: &FragmentIdent<Self>) -> fmt::Result {
+    fn compile_wwma_fragment_ident(
+        f: &mut fmt::Formatter<'_>,
+        ident: &FragmentIdent<Self>,
+    ) -> fmt::Result {
         Wmma::compile_wwma_fragment_ident(f, ident)
     }
-    fn compile_wmma_fragment_layout(f: &mut fmt::Formatter<'_>, layout: &FragmentLayout<Self>) -> fmt::Result {
+    fn compile_wmma_fragment_layout(
+        f: &mut fmt::Formatter<'_>,
+        layout: &FragmentLayout<Self>,
+    ) -> fmt::Result {
         Wmma::compile_wmma_fragment_layout(f, layout)
     }
     fn compile_wmma_fragment(f: &mut fmt::Formatter<'_>, fragment: &Fragment<Self>) -> fmt::Result {
         Wmma::compile_wmma_fragment(f, fragment)
     }
-    fn compile_wmma_fragment_declaration(f: &mut fmt::Formatter<'_>, var: &Variable<Self>) -> fmt::Result {
+    fn compile_wmma_fragment_declaration(
+        f: &mut fmt::Formatter<'_>,
+        var: &Variable<Self>,
+    ) -> fmt::Result {
         Wmma::compile_wmma_fragment_declaration(f, var)
     }
-    fn compile_wmma_instruction(f: &mut fmt::Formatter<'_>, instruction: &WmmaInstruction<Self>) -> fmt::Result {
+    fn compile_wmma_instruction(
+        f: &mut fmt::Formatter<'_>,
+        instruction: &WmmaInstruction<Self>,
+    ) -> fmt::Result {
         Wmma::compile_wmma_instruction(f, instruction)
     }
     fn compile_manual_mma(f: &mut fmt::Formatter<'_>, mma: ManualMma<Self>) -> fmt::Result {

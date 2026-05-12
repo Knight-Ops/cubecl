@@ -57,9 +57,7 @@ impl DialectWmmaCompiler<TtMetalDialect<TtNoWmma>> for TtNoWmma {
         Vec::new()
     }
 
-    fn supported_scaled_mma_combinations(
-        _arch: &TtArchitecture,
-    ) -> SupportedScaledMmaCombinations {
+    fn supported_scaled_mma_combinations(_arch: &TtArchitecture) -> SupportedScaledMmaCombinations {
         Vec::new()
     }
 }
