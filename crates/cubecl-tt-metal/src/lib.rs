@@ -24,10 +24,11 @@ mod tests {
 
     pub type TestRuntime = crate::runtime::TtRuntime;
 
-    // NOTE: testgen!() macros are disabled for now — they require a working
-    // IR pipeline which will be implemented in Phase 4+.
+    // NOTE: testgen!() macros are disabled until broader dialect operation
+    // support is implemented (atan2, hypot, pow, atomics, comparisons, enums).
+    // Currently only Copy and EltwiseBinaryAdd operations are supported.
     // cubecl_std::testgen!();
-    // cubecl_core::testgen_all!(f32: [f32]);
+    // cubecl_core::testgen_all!(f32: [f32], i32: [i32], u32: [u32]);
 
     fn hardware_tests_enabled() -> bool {
         env::var_os("TT_METAL_RUN_HARDWARE_TESTS").is_some()

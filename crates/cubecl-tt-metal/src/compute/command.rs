@@ -5,6 +5,7 @@ use cubecl_common::bytes::Bytes;
 use cubecl_core::server::{
     Binding, CopyDescriptor, ExecutionMode, IoError, LaunchError, ServerError,
 };
+use cubecl_core::zspace::striding::has_pitched_row_major_strides;
 use cubecl_runtime::compiler::CubeTask;
 use cubecl_runtime::logging::ServerLogger;
 use cubecl_runtime::memory_management::ManagedMemoryHandle;
@@ -32,6 +33,25 @@ impl<'a> Command<'a> {
         self.streams.current().memory_management_gpu.reserve(size)
     }
 
+    /// Bind a reserved memory allocation to a managed memory handle.
+    pub fn bind(&mut self, reserved: ManagedMemoryHandle, new: ManagedMemoryHandle) {
+        let cursor = self.cursor();
+        self.streams
+            .current()
+            .memory_management_gpu
+            .bind(reserved, new, cursor)
+            .unwrap();
+    }
+
+    /// Allocate host-side staging memory (for CPU↔GPU transfers).
+    pub fn reserve_cpu(&mut self, size: usize) -> Bytes {
+        Bytes::from_bytes_vec(vec![0u8; size])
+    }
+
+    pub fn cursor(&self) -> u64 {
+        self.streams.cursor
+    }
+
     pub fn error(&mut self, error: ServerError) {
         self.streams.current().errors.push(error);
     }
@@ -53,15 +73,27 @@ impl<'a> Command<'a> {
         let storage = &mut stream.memory_management_gpu;
         let mesh_buffer = storage.storage().get_mesh_buffer(resource.storage_id);
 
+        // Validate strides: only contiguous row-major tensors are supported
+        if !has_pitched_row_major_strides(&descriptor.shape, &descriptor.strides) {
+            return Err(IoError::UnsupportedStrides {
+                backtrace: BackTrace::capture(),
+            });
+        }
+
         let num_bytes: usize = descriptor.shape.iter().product::<usize>() * descriptor.elem_size;
-        let slice = if data.len() >= num_bytes {
-            &data[..num_bytes]
-        } else {
-            &data[..]
-        };
+        if data.len() < num_bytes {
+            return Err(IoError::Unknown {
+                backtrace: BackTrace::capture(),
+                description: format!(
+                    "write_to_gpu: data size {} < expected {}",
+                    data.len(),
+                    num_bytes
+                ),
+            });
+        }
 
         self.mesh
-            .write_mesh_buffer(mesh_buffer, slice)
+            .write_mesh_buffer(mesh_buffer, &data[..num_bytes])
             .map_err(|e| IoError::Unknown {
                 backtrace: BackTrace::capture(),
                 description: format!("write_mesh_buffer failed: {}", e.what()),

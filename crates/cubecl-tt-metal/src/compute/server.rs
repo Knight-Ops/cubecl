@@ -66,13 +66,8 @@ impl ComputeServer for TtServer {
         )?;
         Ok(sizes
             .iter()
-            .map(|size| {
-                command
-                    .reserve(*size as u64)
-                    .map(|_| Bytes::from_bytes_vec(vec![0u8; *size]))
-            })
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap_or_default())
+            .map(|size| command.reserve_cpu(*size))
+            .collect())
     }
 
     fn initialize_memory(&mut self, memory: ManagedMemoryHandle, size: u64, stream_id: StreamId) {
@@ -87,9 +82,7 @@ impl ComputeServer for TtServer {
             Err(err) => unreachable!("{err:?}"),
         };
         let reserved = command.reserve(size).unwrap();
-        // Bind the reserved memory to the managed memory handle
-        // TODO: proper binding
-        let _ = (reserved, memory);
+        command.bind(reserved, memory);
     }
 
     fn read(
@@ -162,7 +155,16 @@ impl ComputeServer for TtServer {
         }
     }
 
-    fn flush(&mut self, _stream_id: StreamId) -> Result<(), ServerError> {
+    fn flush(&mut self, stream_id: StreamId) -> Result<(), ServerError> {
+        let mut command = self.command_no_inputs(
+            stream_id,
+            StreamErrorMode {
+                ignore: false,
+                flush: true,
+            },
+        )?;
+        // Flush GPU storage (synchronous — no-op for TT)
+        let _current = command.streams.current();
         Ok(())
     }
 
@@ -205,18 +207,48 @@ impl ComputeServer for TtServer {
         Ok(ManagedResource::new(memory, resource))
     }
 
-    fn memory_usage(&mut self, _stream_id: StreamId) -> Result<MemoryUsage, ServerError> {
-        Ok(MemoryUsage {
-            number_allocs: 0,
-            bytes_in_use: 0,
-            bytes_padding: 0,
-            bytes_reserved: 0,
-        })
+    fn memory_usage(&mut self, stream_id: StreamId) -> Result<MemoryUsage, ServerError> {
+        let mut command = self.command_no_inputs(
+            stream_id,
+            StreamErrorMode {
+                ignore: false,
+                flush: false,
+            },
+        )?;
+        Ok(command
+            .streams
+            .current()
+            .memory_management_gpu
+            .memory_usage())
     }
 
-    fn memory_cleanup(&mut self, _stream_id: StreamId) {}
+    fn memory_cleanup(&mut self, stream_id: StreamId) {
+        if let Ok(mut command) = self.command_no_inputs(
+            stream_id,
+            StreamErrorMode {
+                ignore: true,
+                flush: false,
+            },
+        ) {
+            command
+                .streams
+                .current()
+                .memory_management_gpu
+                .cleanup(true);
+        }
+    }
 
-    fn allocation_mode(&mut self, _mode: MemoryAllocationMode, _stream_id: StreamId) {}
+    fn allocation_mode(&mut self, mode: MemoryAllocationMode, stream_id: StreamId) {
+        if let Ok(mut command) = self.command_no_inputs(
+            stream_id,
+            StreamErrorMode {
+                ignore: true,
+                flush: false,
+            },
+        ) {
+            command.streams.current().memory_management_gpu.mode(mode);
+        }
+    }
 }
 
 impl ServerCommunication for TtServer {
