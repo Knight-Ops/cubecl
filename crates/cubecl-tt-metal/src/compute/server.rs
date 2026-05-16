@@ -147,13 +147,19 @@ impl ComputeServer for TtServer {
 
     unsafe fn launch(
         &mut self,
-        _kernel: Self::Kernel,
-        _count: CubeCount,
-        _bindings: KernelArguments,
-        _mode: ExecutionMode,
-        _stream_id: StreamId,
+        kernel: Self::Kernel,
+        count: CubeCount,
+        bindings: KernelArguments,
+        mode: ExecutionMode,
+        stream_id: StreamId,
     ) {
-        // TODO: IR-driven launch in Phase 4+
+        if let Err(err) = self.launch_checked(kernel, count, bindings, mode, stream_id) {
+            let mut stream = match self.streams.resolve(stream_id, [].into_iter(), false) {
+                Ok(stream) => stream,
+                Err(err) => unreachable!("{err:?}"),
+            };
+            stream.current().errors.push(err);
+        }
     }
 
     fn flush(&mut self, _stream_id: StreamId) -> Result<(), ServerError> {
@@ -312,6 +318,56 @@ impl TtServer {
     /// Access the underlying `MeshDevice`.
     pub fn mesh(&self) -> &libtt_metal_cxx::MeshDevice {
         &self.mesh
+    }
+
+    /// Compile a `CubeTask` and launch it on the device.
+    fn launch_checked(
+        &mut self,
+        kernel: Box<dyn CubeTask<TtCompiler>>,
+        _count: CubeCount,
+        bindings: KernelArguments,
+        mode: ExecutionMode,
+        stream_id: StreamId,
+    ) -> Result<(), ServerError> {
+        let logger = self.streams.logger.clone();
+        let mut command = self.command(
+            stream_id,
+            bindings.buffers.iter(),
+            StreamErrorMode {
+                ignore: true,
+                flush: false,
+            },
+        )?;
+
+        // Resolve buffer addresses from bindings
+        // Standard CubeCL convention: last buffer is output, preceding are inputs
+        let resources: Vec<_> = bindings
+            .buffers
+            .iter()
+            .map(|b| {
+                command
+                    .resource(b.clone())
+                    .map(|r| r.address)
+                    .map_err(|e| ServerError::Generic {
+                        reason: format!("resource: {e:?}"),
+                        backtrace: BackTrace::capture(),
+                    })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let (input_addrs, output_addrs) = if resources.len() <= 1 {
+            (resources.as_slice(), [].as_slice())
+        } else {
+            let split = resources.len() - 1;
+            (&resources[..split], &resources[split..])
+        };
+
+        command
+            .kernel_cube(kernel, mode, input_addrs, output_addrs, logger)
+            .map_err(|e| ServerError::Generic {
+                reason: format!("{e:?}"),
+                backtrace: BackTrace::capture(),
+            })
     }
 
     /// Launch a kernel from pre-built TT-Metal sources.

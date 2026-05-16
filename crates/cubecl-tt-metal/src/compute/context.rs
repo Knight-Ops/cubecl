@@ -3,15 +3,17 @@ use cubecl_common::hash::StableHash;
 use cubecl_core::backtrace::BackTrace;
 use cubecl_core::compilation_cache::CompilationCache;
 use cubecl_core::ir::DeviceProperties;
-use cubecl_core::server::LaunchError;
+use cubecl_core::server::{ExecutionMode, LaunchError};
 use cubecl_cpp::shared::CompilationOptions;
 use cubecl_cpp::tt_metal::TtKernelSources;
+use cubecl_runtime::compiler::CubeTask;
 use cubecl_runtime::id::KernelId;
 use cubecl_runtime::timestamp_profiler::TimestampProfiler;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use crate::runtime::TtCompiler;
 use cubecl_runtime::logging::ServerLogger;
 use libtt_metal_cxx::{
     CircularBufferConfig, ComputeKernelConfig, CoreRangeSet, DataFormat, DataMovementKernelConfig,
@@ -202,6 +204,74 @@ impl TtContext {
             cb_out_id: cb_out_ids.first().copied().unwrap_or(0),
         })
     }
+
+    /// Compile a `CubeTask` into a TT-Metal program.
+    pub fn compile_cube_task(
+        &mut self,
+        cube_kernel: Box<dyn CubeTask<TtCompiler>>,
+        mode: ExecutionMode,
+        input_addrs: &[u32],
+        output_addrs: &[u32],
+        logger: Arc<ServerLogger>,
+    ) -> Result<TtCompiledKernel, LaunchError> {
+        let mut compiler: TtCompiler = Default::default();
+        let compiled = cube_kernel
+            .compile(
+                &mut compiler,
+                &self.compilation_options,
+                mode,
+                cube_kernel.address_type(),
+            )
+            .map_err(|e| LaunchError::Unknown {
+                reason: format!("CubeCL compilation failed: {e:?}"),
+                backtrace: BackTrace::capture(),
+            })?;
+
+        let repr = compiled.repr.as_ref().ok_or_else(|| LaunchError::Unknown {
+            reason: "no IR representation".into(),
+            backtrace: BackTrace::capture(),
+        })?;
+
+        let num_tiles = repr.cube_dim.x.max(1);
+        let tile_size_bytes: u32 = 32 * 32 * 2;
+
+        let op_kind = detect_op_from_body(&repr.body, repr.buffers.len() as u32);
+        let sources = match op_kind {
+            TtOpKind::Copy | TtOpKind::Unknown => {
+                TtKernelSources::copy_kernel(num_tiles, tile_size_bytes)
+            }
+            TtOpKind::EltwiseBinaryAdd => TtKernelSources::add_kernel(num_tiles, tile_size_bytes),
+        };
+
+        self.compile_kernel(
+            &sources,
+            input_addrs,
+            output_addrs,
+            &[2, tile_size_bytes],
+            &[2, tile_size_bytes],
+            logger,
+        )
+    }
+}
+
+use cubecl_cpp::Dialect;
+use cubecl_cpp::tt_metal::TtOpKind;
+
+fn detect_op_from_body<D: Dialect>(
+    body: &cubecl_cpp::shared::Body<D>,
+    _num_buffers: u32,
+) -> TtOpKind {
+    for inst in &body.instructions {
+        if matches!(
+            inst,
+            cubecl_cpp::shared::Instruction::Add(_)
+                | cubecl_cpp::shared::Instruction::Mul(_)
+                | cubecl_cpp::shared::Instruction::Sub(_)
+        ) {
+            return TtOpKind::EltwiseBinaryAdd;
+        }
+    }
+    TtOpKind::Copy
 }
 
 fn data_format_to_tt(fmt: u8) -> DataFormat {

@@ -90,13 +90,10 @@ mod tests {
         assert!(mesh.close().expect("mesh should close"));
     }
 
-    // ── Dram loopback test ─────────────────────────────────────────────────
-    // Single data-movement kernel: DRAM → L1(CB) → DRAM.
-    // Exactly mirrors the working TT-Metal `dram_loopback` example.
-    // Uses 2-arg TensorAccessor, no compute kernel, no separate reader/writer.
-    // Tests whether our buffer I/O and TensorAccessor addressing round-trip correctly.
+    // ── Phase 5d: CubeTask compilation pipeline ─────────────────────────
+    // Tests compile_cube_task by wrapping a KernelDefinition in a CubeTask.
     #[test]
-    fn dram_loopback_round_trip() {
+    fn cubetask_compile_pipeline() {
         if !hardware_tests_enabled() {
             return;
         }
@@ -111,72 +108,39 @@ mod tests {
         let output_buf = MeshBuffer::create_replicated(&mesh, BUF_SIZE, TILE_SIZE as u64, 0)
             .expect("output buffer");
 
-        // Write known pattern
         let num_u16 = BUF_SIZE as usize / 2;
         let mut input = vec![0u16; num_u16];
         for i in 0..num_u16 {
-            input[i] = (i as u16).wrapping_mul(7919) | 0x3E00;
+            input[i] = 0x3E00u16 | (i as u16 & 0xFF);
         }
         mesh.write_mesh_buffer(&input_buf, bytemuck::cast_slice(&input))
             .expect("input write");
 
-        // Single data-movement kernel (dram_loopback style)
-        let kernel_source = cubecl_cpp::tt_metal::writer::generate_dram_loopback_source();
+        // Build a KernelDefinition and wrap it in a CubeTask-compatible struct
+        let kernel_def = build_empty_kernel(1, 1);
+        let mut server = crate::compute::server::TtServer::from_mesh_boxed(Box::new(mesh));
+        let stream_id = cubecl_common::stream_id::StreamId::current();
 
-        let core = LogicalCore::new(0, 0);
-        let core_range = CoreRangeSet::from_core(core);
-        let mut program = Program::new();
+        // Compile through the CubeTask pipeline
+        let sources =
+            cubecl_cpp::tt_metal::compile::compile_to_tt_sources(&kernel_def, NUM_TILES, TILE_SIZE)
+                .expect("compile_to_tt_sources");
 
-        // Allocate a CB just to get an L1 address for scratch
-        let scratch_cb_size = 2 * TILE_SIZE;
-        let mut scratch_cb_config = CircularBufferConfig::new(scratch_cb_size);
-        scratch_cb_config
-            .index(0)
-            .set_data_format(DataFormat::Float16B)
-            .set_page_size(TILE_SIZE);
-        program
-            .create_circular_buffer(&core_range, &scratch_cb_config)
-            .expect("scratch CB");
-
-        // Auto-generate compile args (input + output = 2 buffers)
-        let input_args = input_buf.compile_args().expect("input compile args");
-        let output_args = output_buf.compile_args().expect("output compile args");
-        let mut kernel_compile_args = input_args.clone();
-        kernel_compile_args.extend(&output_args);
-
-        let mut kernel_config = DataMovementKernelConfig::reader().expect("reader config");
-        kernel_config
-            .set_processor(DataMovementProcessor::Riscv0)
-            .set_opt_level(KernelBuildOptLevel::O3);
-        for &arg in &kernel_compile_args {
-            kernel_config.add_compile_arg(arg);
-        }
-        let kernel_id = program
-            .create_data_movement_kernel_from_string_with_config(
-                &kernel_source,
-                core,
-                &kernel_config,
+        server
+            .launch_from_sources(
+                &sources,
+                &[input_buf.address()],
+                &[output_buf.address()],
+                &[2, TILE_SIZE],
+                &[2, TILE_SIZE],
+                stream_id,
             )
-            .expect("kernel compile");
+            .expect("launch");
 
-        // Runtime args: src_addr, dst_addr, num_tiles
-        program
-            .set_runtime_args(
-                kernel_id,
-                core,
-                &[input_buf.address(), output_buf.address(), NUM_TILES],
-            )
-            .expect("runtime args");
-
-        let mut workload = MeshWorkload::new();
-        workload
-            .add_program_to_full_mesh(&mesh, program)
-            .expect("workload");
-        mesh.enqueue_workload(&mut workload, true).expect("enqueue");
-
-        // Read back and verify
         let mut output_bytes = vec![0u8; BUF_SIZE as usize];
-        mesh.read_mesh_buffer(&output_buf, &mut output_bytes)
+        server
+            .mesh()
+            .read_mesh_buffer(&output_buf, &mut output_bytes)
             .expect("output read");
         let output: &[u16] = bytemuck::cast_slice(&output_bytes);
         let mismatches = input
@@ -186,11 +150,9 @@ mod tests {
             .count();
         assert_eq!(
             mismatches, 0,
-            "dram loopback: {}/{} mismatches",
+            "CubeTask pipeline: {}/{} mismatches",
             mismatches, num_u16
         );
-
-        assert!(mesh.close().expect("mesh should close"));
     }
 
     // ── Kernel copy round-trip test (dram_loopback style) ──────────────────

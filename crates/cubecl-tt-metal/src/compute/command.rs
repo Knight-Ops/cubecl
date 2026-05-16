@@ -1,7 +1,11 @@
 use crate::compute::{context::TtContext, stream::TtStreamBackend};
+use crate::runtime::TtCompiler;
 use cubecl_common::backtrace::BackTrace;
 use cubecl_common::bytes::Bytes;
-use cubecl_core::server::{Binding, CopyDescriptor, IoError, LaunchError, ServerError};
+use cubecl_core::server::{
+    Binding, CopyDescriptor, ExecutionMode, IoError, LaunchError, ServerError,
+};
+use cubecl_runtime::compiler::CubeTask;
 use cubecl_runtime::logging::ServerLogger;
 use cubecl_runtime::memory_management::ManagedMemoryHandle;
 use cubecl_runtime::stream::ResolvedStreams;
@@ -122,6 +126,35 @@ impl<'a> Command<'a> {
                 backtrace: BackTrace::capture(),
             })?;
 
+        Ok(())
+    }
+
+    /// Compile and launch a `CubeTask` kernel.
+    pub fn kernel_cube(
+        &mut self,
+        cube_kernel: Box<dyn CubeTask<TtCompiler>>,
+        mode: ExecutionMode,
+        input_addrs: &[u32],
+        output_addrs: &[u32],
+        logger: Arc<ServerLogger>,
+    ) -> Result<(), LaunchError> {
+        let compiled =
+            self.ctx
+                .compile_cube_task(cube_kernel, mode, input_addrs, output_addrs, logger)?;
+
+        let mut workload = libtt_metal_cxx::MeshWorkload::new();
+        workload
+            .add_program_to_full_mesh(self.mesh, compiled.program)
+            .map_err(|e| LaunchError::Unknown {
+                reason: format!("add_program_to_full_mesh: {}", e.what()),
+                backtrace: BackTrace::capture(),
+            })?;
+        self.mesh
+            .enqueue_workload(&mut workload, true)
+            .map_err(|e| LaunchError::Unknown {
+                reason: format!("enqueue_workload: {}", e.what()),
+                backtrace: BackTrace::capture(),
+            })?;
         Ok(())
     }
 }

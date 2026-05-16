@@ -1,53 +1,53 @@
 - program_created:
     id: 25
-    timestamp_ns: 1778903093402369606
+    timestamp_ns: 1778904859558287524
 - program_compile_started:
     id: 25
-    timestamp_ns: 1778903093402778606
+    timestamp_ns: 1778904859558686858
 - program_kernel_compile_finished:
     id: 25
-    timestamp_ns: 1778903093402948026
-    duration_ns: 169420
+    timestamp_ns: 1778904859558862360
+    duration_ns: 175502
     watcher_kernel_id: 3
     name: cq_dispatch_subordinate
     path: /home/carl/.cache/tt-metal-cache/7480443082328483327/kernels/cq_dispatch_subordinate/7227152901424362888/
     source: tt_metal/impl/dispatch/kernels/cq_dispatch_subordinate.cpp
 - program_kernel_compile_finished:
     id: 25
-    timestamp_ns: 1778903093402980467
-    duration_ns: 201861
+    timestamp_ns: 1778904859558899279
+    duration_ns: 212421
     watcher_kernel_id: 2
     name: cq_dispatch
     path: /home/carl/.cache/tt-metal-cache/7480443082328483327/kernels/cq_dispatch/304047669242341916/
     source: tt_metal/impl/dispatch/kernels/cq_dispatch.cpp
 - program_kernel_compile_finished:
     id: 25
-    timestamp_ns: 1778903093403004803
-    duration_ns: 226197
+    timestamp_ns: 1778904859558916521
+    duration_ns: 229663
     watcher_kernel_id: 1
     name: cq_prefetch
     path: /home/carl/.cache/tt-metal-cache/7480443082328483327/kernels/cq_prefetch/11681118040740904905/
     source: tt_metal/impl/dispatch/kernels/cq_prefetch.cpp
 - program_compile_finished:
     id: 25
-    timestamp_ns: 1778903093403093320
-    duration_ns: 314714
+    timestamp_ns: 1778904859558994218
+    duration_ns: 307360
 - program_created:
     id: 26
-    timestamp_ns: 1778903093504198358
+    timestamp_ns: 1778904859660228731
 - program_created:
     id: 27
-    timestamp_ns: 1778903093504366063
+    timestamp_ns: 1778904859660396398
 - program_destroyed:
     id: 27
-    timestamp_ns: 1778903093504368819
+    timestamp_ns: 1778904859660399193
 - program_compile_started:
     id: 26
-    timestamp_ns: 1778903093504376643
+    timestamp_ns: 1778904859660408721
 - program_kernel_compile_finished:
     id: 26
-    timestamp_ns: 1778903093506079973
-    duration_ns: 1703330
+    timestamp_ns: 1778904859661277022
+    duration_ns: 868301
     watcher_kernel_id: 5
     name: Kernel_Source_Code
     path: /home/carl/.cache/tt-metal-cache/7480443082328483327/kernels/Kernel_Source_Code/5280336292146275134/
@@ -72,8 +72,8 @@ void kernel_main() {
 
 - program_kernel_compile_finished:
     id: 26
-    timestamp_ns: 1778903093506105802
-    duration_ns: 1729159
+    timestamp_ns: 1778904859661309683
+    duration_ns: 900962
     watcher_kernel_id: 4
     name: Kernel_Source_Code
     path: /home/carl/.cache/tt-metal-cache/7480443082328483327/kernels/Kernel_Source_Code/17472717039781710656/
@@ -101,11 +101,11 @@ void kernel_main() {
 
 - program_compile_finished:
     id: 26
-    timestamp_ns: 1778903093543701881
-    duration_ns: 39325238
+    timestamp_ns: 1778904859661675093
+    duration_ns: 1266372
 - program_destroyed:
     id: 25
-    timestamp_ns: 1778903093545421020
+    timestamp_ns: 1778904859663225863
 - program_destroyed:
     id: 26
-    timestamp_ns: 1778903093545477506
+    timestamp_ns: 1778904859663306125
