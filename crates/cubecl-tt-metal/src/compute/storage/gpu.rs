@@ -19,8 +19,8 @@ unsafe impl Send for TtStorage {}
 
 /// GPU storage for TT-Metal device memory.
 ///
-/// Manages allocations using TT-Metal replicated MeshBuffers in DRAM.
-/// All allocations are tile-aligned (multiples of 32×32×element_size).
+/// Manages allocations using TT-Metal replicated `MeshBuffers` in DRAM.
+/// All allocations are tile-aligned (multiples of `32×32×element_size`).
 #[derive(Debug)]
 pub struct TtStorage {
     mesh_ptr: *const MeshDevice,
@@ -29,6 +29,7 @@ pub struct TtStorage {
     page_size: u64,
 }
 
+#[allow(clippy::new_without_default)]
 impl TtStorage {
     pub fn new() -> Self {
         Self {
@@ -73,7 +74,7 @@ impl ComputeStorage for TtStorage {
     fn alloc(&mut self, size: u64) -> Result<StorageHandle, IoError> {
         let mesh = self.mesh();
         // Tile-align: round up to nearest page_size boundary
-        let aligned_size = ((size + self.page_size - 1) / self.page_size) * self.page_size;
+        let aligned_size = size.div_ceil(self.page_size) * self.page_size;
         let page_size = self.page_size;
 
         let buffer = MeshBuffer::create_replicated(

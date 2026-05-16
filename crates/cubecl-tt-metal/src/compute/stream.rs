@@ -27,6 +27,7 @@ pub struct TtStreamBackend {
     mesh_ptr: *const libtt_metal_cxx::MeshDevice,
     mem_props: MemoryDeviceProperties,
     mem_config: MemoryConfiguration,
+    #[allow(dead_code)]
     mem_alignment: usize,
 }
 

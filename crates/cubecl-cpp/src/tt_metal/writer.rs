@@ -2,7 +2,7 @@
 ///
 /// Uses `TensorAccessorArgs` with `noc_async_write_tile` for correct
 /// interleaved DRAM tile addressing. Each output buffer needs 2 compile-time
-/// args: [ArgConfig flags, AlignedPageSize].
+/// args: [`ArgConfig`] flags, [`AlignedPageSize`].
 pub fn generate_writer_source(num_outputs: u32) -> String {
     assert!(num_outputs >= 1, "at least one output buffer required");
 
@@ -36,7 +36,6 @@ pub fn generate_writer_source(num_outputs: u32) -> String {
     // Use the 3-arg constructor with get_tile_size() as documented.
     src.push('\n');
     for i in 0..num_outputs {
-        let cb_idx = 16 + i;
         if i == 0 {
             src.push_str(&format!(
                 "    constexpr auto c{}_args = TensorAccessorArgs<0>();\n",
@@ -49,8 +48,8 @@ pub fn generate_writer_source(num_outputs: u32) -> String {
             ));
         }
         src.push_str(&format!(
-            "    const auto c{} = TensorAccessor(c{}_args, dst{}_addr, get_tile_size(cb_out{}));\n",
-            i, i, i, i
+            "    const auto c{} = TensorAccessor(c{}_args, dst{}_addr);\n",
+            i, i, i
         ));
     }
 
@@ -75,9 +74,50 @@ pub fn generate_writer_source(num_outputs: u32) -> String {
     src
 }
 
+/// Generate a single-kernel dram_loopback-style copy source.
+///
+/// Uses a circular buffer as scratch space for the DRAM→DRAM copy.
+/// Reads tiles from input DRAM into the CB, then writes from the CB
+/// to output DRAM. No compute kernel, no separate reader/writer.
+/// This matches the TT-Metal `dram_loopback` example pattern adapted to use CBs.
+pub fn generate_dram_loopback_source() -> String {
+    r#"#include <cstdint>
+
+void kernel_main() {
+    uint32_t dram_buffer_src_addr = get_arg_val<uint32_t>(0);
+    uint32_t dram_buffer_dst_addr = get_arg_val<uint32_t>(1);
+    uint32_t num_tiles = get_arg_val<uint32_t>(2);
+
+    constexpr uint32_t cb_scratch = tt::CBIndex::c_0;
+
+    constexpr auto in0_args = TensorAccessorArgs<0>();
+    const auto in0 = TensorAccessor(in0_args, dram_buffer_src_addr);
+
+    constexpr auto out0_args = TensorAccessorArgs<in0_args.next_compile_time_args_offset()>();
+    const auto out0 = TensorAccessor(out0_args, dram_buffer_dst_addr);
+
+    for (uint32_t i = 0; i < num_tiles; i++) {
+        cb_reserve_back(cb_scratch, 1);
+        uint32_t l1_addr = get_write_ptr(cb_scratch);
+        noc_async_read_tile(i, in0, l1_addr);
+        noc_async_read_barrier();
+        cb_push_back(cb_scratch, 1);
+
+        cb_wait_front(cb_scratch, 1);
+        l1_addr = get_read_ptr(cb_scratch);
+        noc_async_write_tile(i, out0, l1_addr);
+        noc_async_write_barrier();
+        cb_pop_front(cb_scratch, 1);
+    }
+}
+"#
+    .to_string()
+}
+
 /// Generate the C++ source for a simple copy compute kernel.
 pub fn generate_copy_compute_source() -> String {
     r#"#include "api/compute/common.h"
+#include "api/compute/eltwise_binary.h"
 #include "api/compute/tile_move_copy.h"
 #include "api/compute/compute_kernel_api.h"
 
@@ -88,6 +128,11 @@ void kernel_main() {
     constexpr auto cb_out0 = tt::CBIndex::c_16;
     constexpr uint32_t dst_reg = 0;
 
+    // Initialize the compute engine for copy operations on these CBs.
+    // binary_op_init_common sets up the Unpack/Math/Pack cores.
+    binary_op_init_common(cb_in0, cb_in0, cb_out0);
+    copy_tile_init(cb_in0);
+
     for (uint32_t i = 0; i < num_tiles; i++) {
         tile_regs_acquire();
         cb_wait_front(cb_in0, 1);
@@ -96,6 +141,48 @@ void kernel_main() {
         tile_regs_wait();
 
         cb_pop_front(cb_in0, 1);
+
+        cb_reserve_back(cb_out0, 1);
+        pack_tile(dst_reg, cb_out0);
+        cb_push_back(cb_out0, 1);
+
+        tile_regs_release();
+    }
+}
+"#
+    .to_string()
+}
+
+/// Generate the C++ source for an element-wise addition compute kernel.
+///
+/// Reads two input tiles from CBs 0 and 1, adds them, and writes the result
+/// to CB 16. Follows the TT-Metal vecadd compute kernel pattern.
+pub fn generate_add_compute_source() -> String {
+    r#"#include "api/compute/common.h"
+#include "api/compute/eltwise_binary.h"
+#include "api/compute/compute_kernel_api.h"
+
+void kernel_main() {
+    uint32_t num_tiles = get_arg_val<uint32_t>(0);
+
+    constexpr auto cb_in0 = tt::CBIndex::c_0;
+    constexpr auto cb_in1 = tt::CBIndex::c_1;
+    constexpr auto cb_out0 = tt::CBIndex::c_16;
+    constexpr uint32_t dst_reg = 0;
+
+    binary_op_init_common(cb_in0, cb_in1, cb_out0);
+    add_tiles_init(cb_in0, cb_in1);
+
+    for (uint32_t i = 0; i < num_tiles; i++) {
+        tile_regs_acquire();
+        cb_wait_front(cb_in0, 1);
+        cb_wait_front(cb_in1, 1);
+        add_tiles(cb_in0, cb_in1, 0, 0, dst_reg);
+        tile_regs_commit();
+        tile_regs_wait();
+
+        cb_pop_front(cb_in0, 1);
+        cb_pop_front(cb_in1, 1);
 
         cb_reserve_back(cb_out0, 1);
         pack_tile(dst_reg, cb_out0);

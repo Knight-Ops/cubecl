@@ -1,8 +1,8 @@
 use std::fmt;
 
 use crate::shared::{
-    DialectWmmaCompiler, Flags, Fragment, FragmentIdent, FragmentLayout, ManualMma,
-    SupportedMmaCombinations, SupportedScaledMmaCombinations, Variable, WmmaInstruction,
+    DialectWmmaCompiler, ManualMma, SupportedMmaCombinations, SupportedScaledMmaCombinations,
+    Variable, WmmaInstruction,
 };
 
 use super::TtArchitecture;
@@ -13,7 +13,7 @@ use super::dialect::TtMetalDialect;
 /// Tensix cores do not have tensor cores in the CUDA/HIP sense.
 /// Matrix operations are performed by the FPU (matrix engine).
 /// WMMA and MMA combinations are empty; compilation methods panic
-/// if called (CubeCL will not generate WMMA ops without registered support).
+/// if called (`CubeCL` will not generate `WMMA` ops without registered support).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct TtNoWmma;
 

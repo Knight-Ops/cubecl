@@ -15,22 +15,18 @@ use std::sync::Arc;
 use cubecl_runtime::logging::ServerLogger;
 use libtt_metal_cxx::{
     CircularBufferConfig, ComputeKernelConfig, CoreRangeSet, DataFormat, DataMovementKernelConfig,
-    DataMovementProcessor, KernelBuildOptLevel, LogicalCore, MathFidelity, MeshDevice,
-    MeshWorkload, Program,
+    DataMovementProcessor, KernelBuildOptLevel, LogicalCore, MathFidelity, Program,
 };
 
 #[derive(Debug)]
+#[allow(dead_code)]
 pub(crate) struct TtContext {
-    mesh_ptr: *const MeshDevice,
     pub compiled_sources: HashMap<KernelId, TtKernelSources>,
     pub timestamps: TimestampProfiler,
     pub compilation_options: CompilationOptions,
     pub properties: DeviceProperties,
     pub compilation_cache: Option<CompilationCache<StableHash, CompilationCacheEntry>>,
 }
-
-// SAFETY: mesh_ptr is set during TtServer::new() and lives as long as TtServer.
-unsafe impl Send for TtContext {}
 
 pub struct TtCompiledKernel {
     pub program: Program,
@@ -64,7 +60,6 @@ pub struct CompilationCacheEntry {
 impl TtContext {
     pub fn new(compilation_options: CompilationOptions, properties: DeviceProperties) -> Self {
         Self {
-            mesh_ptr: std::ptr::null(),
             compiled_sources: HashMap::new(),
             timestamps: TimestampProfiler::default(),
             compilation_options,
@@ -85,75 +80,60 @@ impl TtContext {
         }
     }
 
-    pub fn set_mesh_ptr(&mut self, ptr: *const MeshDevice) {
-        self.mesh_ptr = ptr;
-    }
-
-    pub fn mesh(&self) -> &MeshDevice {
-        assert!(!self.mesh_ptr.is_null(), "mesh_ptr not set");
-        unsafe { &*self.mesh_ptr }
-    }
-
     /// Compile a kernel from TT-Metal sources into a Program with kernels and CBs.
-    ///
-    /// This does NOT use the CubeCL IR pipeline yet. It uses pre-generated
-    /// TtKernelSources (reader/compute/writer C++ strings) and compiles them
-    /// through TT-Metal's host compiler.
     pub fn compile_kernel(
         &mut self,
-        kernel_id: &KernelId,
         sources: &TtKernelSources,
-        input_addr: u32,
-        output_addr: u32,
+        input_addrs: &[u32],
+        output_addrs: &[u32],
+        reader_compile_args: &[u32],
+        writer_compile_args: &[u32],
         _logger: Arc<ServerLogger>,
     ) -> Result<TtCompiledKernel, LaunchError> {
         let core = LogicalCore::new(0, 0);
         let core_range = CoreRangeSet::from_core(core);
 
-        // Create the Program
         let mut program = Program::new();
 
-        // Configure Circular Buffers
-        let cb_tiles = 2u32; // double buffering
+        let cb_tiles = 2u32;
         let cb_size = cb_tiles * sources.tile_size_bytes;
         let cb_format = data_format_to_tt(sources.data_format_tt);
 
-        // Input CB at index 0
-        let mut cb_in_config = CircularBufferConfig::new(cb_size);
-        cb_in_config
-            .index(0)
-            .set_data_format(cb_format)
-            .set_page_size(sources.tile_size_bytes);
-        let cb_in_id = program
-            .create_circular_buffer(&core_range, &cb_in_config)
-            .map_err(|e| LaunchError::Unknown {
-                reason: format!("failed to create input CB: {}", e.what()),
-                backtrace: BackTrace::capture(),
-            })?;
+        // Input CBs at indices 0, 1, 2, ...
+        let mut cb_in_ids = Vec::new();
+        for i in 0..sources.num_inputs {
+            let mut cb_config = CircularBufferConfig::new(cb_size);
+            cb_config
+                .index(i as u8)
+                .set_data_format(cb_format)
+                .set_page_size(sources.tile_size_bytes);
+            let id = program
+                .create_circular_buffer(&core_range, &cb_config)
+                .map_err(map_launch_err("input CB create"))?;
+            cb_in_ids.push(id);
+        }
 
-        // Output CB at index 16
-        let mut cb_out_config = CircularBufferConfig::new(cb_size);
-        cb_out_config
-            .index(16)
-            .set_data_format(cb_format)
-            .set_page_size(sources.tile_size_bytes);
-        let cb_out_id = program
-            .create_circular_buffer(&core_range, &cb_out_config)
-            .map_err(|e| LaunchError::Unknown {
-                reason: format!("failed to create output CB: {}", e.what()),
-                backtrace: BackTrace::capture(),
-            })?;
+        // Output CBs at indices 16, 17, 18, ...
+        let mut cb_out_ids = Vec::new();
+        for i in 0..sources.num_outputs {
+            let mut cb_config = CircularBufferConfig::new(cb_size);
+            cb_config
+                .index(16u8 + i as u8)
+                .set_data_format(cb_format)
+                .set_page_size(sources.tile_size_bytes);
+            let id = program
+                .create_circular_buffer(&core_range, &cb_config)
+                .map_err(map_launch_err("output CB create"))?;
+            cb_out_ids.push(id);
+        }
 
-        // Create kernels
+        // Reader kernel
         let mut reader_config =
-            DataMovementKernelConfig::reader().map_err(|e| LaunchError::Unknown {
-                reason: format!("failed to create reader config: {}", e.what()),
-                backtrace: BackTrace::capture(),
-            })?;
+            DataMovementKernelConfig::reader().map_err(map_launch_err("reader config"))?;
         reader_config
             .set_processor(DataMovementProcessor::Riscv1)
             .set_opt_level(KernelBuildOptLevel::O3);
-        for &arg in &sources.reader_compile_args {
+        for &arg in reader_compile_args {
             reader_config.add_compile_arg(arg);
         }
         let reader_id = program
@@ -162,20 +142,15 @@ impl TtContext {
                 core,
                 &reader_config,
             )
-            .map_err(|e| LaunchError::Unknown {
-                reason: format!("failed to create reader kernel: {}", e.what()),
-                backtrace: BackTrace::capture(),
-            })?;
+            .map_err(map_launch_err("reader kernel"))?;
 
+        // Writer kernel
         let mut writer_config =
-            DataMovementKernelConfig::writer().map_err(|e| LaunchError::Unknown {
-                reason: format!("failed to create writer config: {}", e.what()),
-                backtrace: BackTrace::capture(),
-            })?;
+            DataMovementKernelConfig::writer().map_err(map_launch_err("writer config"))?;
         writer_config
             .set_processor(DataMovementProcessor::Riscv0)
             .set_opt_level(KernelBuildOptLevel::O3);
-        for &arg in &sources.writer_compile_args {
+        for &arg in writer_compile_args {
             writer_config.add_compile_arg(arg);
         }
         let writer_id = program
@@ -184,11 +159,9 @@ impl TtContext {
                 core,
                 &writer_config,
             )
-            .map_err(|e| LaunchError::Unknown {
-                reason: format!("failed to create writer kernel: {}", e.what()),
-                backtrace: BackTrace::capture(),
-            })?;
+            .map_err(map_launch_err("writer kernel"))?;
 
+        // Compute kernel
         let mut compute_config = ComputeKernelConfig::new();
         compute_config
             .set_math_fidelity(MathFidelity::HiFi4)
@@ -199,49 +172,50 @@ impl TtContext {
                 core,
                 &compute_config,
             )
-            .map_err(|e| LaunchError::Unknown {
-                reason: format!("failed to create compute kernel: {}", e.what()),
-                backtrace: BackTrace::capture(),
-            })?;
+            .map_err(map_launch_err("compute kernel"))?;
 
-        // Set runtime args
+        // Runtime args: reader gets [addr_0, ..., num_tiles, tile_size]
+        let mut reader_args: Vec<u32> = input_addrs.to_vec();
+        reader_args.push(sources.num_tiles);
+        reader_args.push(sources.tile_size_bytes);
         program
-            .set_runtime_args(reader_id, core, &[input_addr, sources.num_tiles])
-            .map_err(|e| LaunchError::Unknown {
-                reason: format!("failed to set reader runtime args: {}", e.what()),
-                backtrace: BackTrace::capture(),
-            })?;
+            .set_runtime_args(reader_id, core, &reader_args)
+            .map_err(map_launch_err("reader runtime args"))?;
+
+        let mut writer_args: Vec<u32> = output_addrs.to_vec();
+        writer_args.push(sources.num_tiles);
+        writer_args.push(sources.tile_size_bytes);
         program
-            .set_runtime_args(writer_id, core, &[output_addr, sources.num_tiles])
-            .map_err(|e| LaunchError::Unknown {
-                reason: format!("failed to set writer runtime args: {}", e.what()),
-                backtrace: BackTrace::capture(),
-            })?;
+            .set_runtime_args(writer_id, core, &writer_args)
+            .map_err(map_launch_err("writer runtime args"))?;
+
         program
             .set_runtime_args(compute_id, core, &[sources.num_tiles])
-            .map_err(|e| LaunchError::Unknown {
-                reason: format!("failed to set compute runtime args: {}", e.what()),
-                backtrace: BackTrace::capture(),
-            })?;
+            .map_err(map_launch_err("compute runtime args"))?;
 
         Ok(TtCompiledKernel {
             program,
             reader_kernel_id: reader_id,
             compute_kernel_id: compute_id,
             writer_kernel_id: writer_id,
-            cb_in_id,
-            cb_out_id,
+            cb_in_id: cb_in_ids.first().copied().unwrap_or(0),
+            cb_out_id: cb_out_ids.first().copied().unwrap_or(0),
         })
     }
 }
 
-/// Map our internal DataFormat value to the TT DataFormat enum.
-/// Values: 0=Float32, 1=Float16, 5=Float16_b, etc.
 fn data_format_to_tt(fmt: u8) -> DataFormat {
     match fmt {
         0 => DataFormat::Float32,
         1 => DataFormat::Float16,
         5 => DataFormat::Float16B,
-        _ => DataFormat::Float16B, // default
+        _ => DataFormat::Float16B,
+    }
+}
+
+fn map_launch_err(context: &'static str) -> impl FnOnce(libtt_metal_cxx::Exception) -> LaunchError {
+    move |e| LaunchError::Unknown {
+        reason: format!("{context}: {}", e.what()),
+        backtrace: BackTrace::capture(),
     }
 }

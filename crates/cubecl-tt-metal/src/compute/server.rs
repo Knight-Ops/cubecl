@@ -3,6 +3,8 @@ use crate::{
     compute::{command::Command, context::TtContext, stream::TtStreamBackend},
     runtime::TtCompiler,
 };
+use cubecl_cpp::tt_metal::TtKernelSources;
+
 use cubecl_common::bytes::Bytes;
 use cubecl_common::future::DynFut;
 use cubecl_common::profile::ProfileDuration;
@@ -10,7 +12,6 @@ use cubecl_common::stream_id::StreamId;
 use cubecl_core::{
     MemoryConfiguration,
     backtrace::BackTrace,
-    future,
     ir::MemoryDeviceProperties,
     prelude::*,
     server::{
@@ -217,7 +218,7 @@ impl ServerCommunication for TtServer {
 }
 
 impl TtServer {
-    /// Create a TtServer from an existing MeshDevice (for testing).
+    /// Create a `TtServer` from an existing `MeshDevice` (for testing).
     pub fn from_mesh(mesh: libtt_metal_cxx::MeshDevice) -> Self {
         use cubecl_common::profile::TimingMethod;
         use cubecl_core::ir::{
@@ -268,7 +269,7 @@ impl TtServer {
             },
         };
 
-        let mut ctx = TtContext::new(comp_opts, device_props.clone());
+        let ctx = TtContext::new(comp_opts, device_props.clone());
         let logger = Arc::new(ServerLogger::default());
         let policy = ContiguousMemoryLayoutPolicy::new(device_props.memory.alignment as usize);
         let utilities = ServerUtilities::new(device_props, logger, (), policy);
@@ -284,7 +285,7 @@ impl TtServer {
 
     pub(crate) fn new(
         mesh: libtt_metal_cxx::MeshDevice,
-        mut ctx: TtContext,
+        ctx: TtContext,
         _mem_props: MemoryDeviceProperties,
         _mem_config: MemoryConfiguration,
         utilities: ServerUtilities<Self>,
@@ -292,10 +293,7 @@ impl TtServer {
         let config = CubeClRuntimeConfig::get();
         let max_streams = config.streaming.max_streams;
 
-        let mesh_ptr: *const libtt_metal_cxx::MeshDevice = &mesh;
-        ctx.set_mesh_ptr(mesh_ptr);
-
-        let backend = TtStreamBackend::new(mesh_ptr);
+        let backend = TtStreamBackend::new(std::ptr::null());
 
         Self {
             mesh,
@@ -305,13 +303,19 @@ impl TtServer {
         }
     }
 
-    /// Launch a copy kernel directly (Phase 2 test harness).
-    pub fn launch_copy_kernel(
+    /// Access the underlying `MeshDevice`.
+    pub fn mesh(&self) -> &libtt_metal_cxx::MeshDevice {
+        &self.mesh
+    }
+
+    /// Launch a kernel from pre-built TT-Metal sources.
+    pub fn launch_from_sources(
         &mut self,
-        input_addr: u32,
-        output_addr: u32,
-        num_tiles: u32,
-        tile_size_bytes: u32,
+        sources: &TtKernelSources,
+        input_addrs: &[u32],
+        output_addrs: &[u32],
+        reader_compile_args: &[u32],
+        writer_compile_args: &[u32],
         stream_id: StreamId,
     ) -> Result<(), ServerError> {
         let logger = self.streams.logger.clone();
@@ -322,14 +326,13 @@ impl TtServer {
                 flush: false,
             },
         )?;
-        let kernel_id = KernelId::new::<()>();
         command
             .kernel(
-                kernel_id,
-                input_addr,
-                output_addr,
-                num_tiles,
-                tile_size_bytes,
+                sources,
+                input_addrs,
+                output_addrs,
+                reader_compile_args,
+                writer_compile_args,
                 logger,
             )
             .map_err(|e| ServerError::Generic {
@@ -353,7 +356,7 @@ impl TtServer {
         mode: StreamErrorMode,
     ) -> Result<Command<'_>, ServerError> {
         let streams = self.streams.resolve(stream_id, handles, !mode.ignore)?;
-        Ok(Command::new(&mut self.ctx, streams))
+        Ok(Command::new(&mut self.ctx, &self.mesh, streams))
     }
 
     pub(crate) fn utilities(&self) -> Arc<ServerUtilities<Self>> {

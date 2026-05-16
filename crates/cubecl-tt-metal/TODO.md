@@ -52,61 +52,93 @@ The full compilation+execution pipeline works on hardware:
 | `Command::read` | `src/compute/command.rs` | Device→host via `MeshDevice::read_mesh_buffer` |
 | `Command::kernel` | `src/compute/command.rs` | Compile → MeshWorkload → enqueue (blocking) |
 | `TtStreamBackend` | `src/compute/stream.rs` | Synchronous; passes mesh_ptr to TtStorage |
-| Test | `src/lib.rs` | `copy_tile_round_trip` — allocates buffers, compiles kernels, executes on hardware |
-
-Test passes: `TT_METAL_RUN_HARDWARE_TESTS=1 LD_LIBRARY_PATH=/usr/local/lib cargo test -p cubecl-tt-metal copy_tile_round_trip -- --nocapture`
+| Test | `src/lib.rs` | `kernel_compile_and_execute` — allocates buffers, compiles kernels, executes on hardware |
 
 ---
 
-## 🔴 Next — Phase 3: Data Tilization
+## ✅ Complete — Phase 3: Tilization Bindings + Reader/Writer Fix
 
-**Why**: TT-Metal stores data in tilized format (32×32 tile layout, rearranged from row-major). Without tilization, tile operations interpret row-major data incorrectly — the copy test runs but output bytes don't match input.
+### 3a. Tilization bindings (`libtt-metal-cxx`)
 
-**What to implement**:
+| File | Change |
+|------|--------|
+| `include/tt_metal_cxx/tilize.hpp` | C++ header: `tilize()` / `untilize()` taking `elem_size` |
+| `src/tt_metal_cxx/tilize.cc` | C++ impl: dispatches by elem_size to `tilize_nfaces<bfloat16>` or `<float>` |
+| `src/ffi.rs` | CXX bridge: `fn tilize(data, m, n, elem_size) -> Vec<u8>` etc. |
+| `src/tilize.rs` | Rust wrappers re-exported at crate root |
+| `build.rs` + `include/tt_metal_cxx.hpp` | Build integration |
 
-### 3a. Host-side tilization
-TT-Metal provides `tilize_nfaces` / `untilize_nfaces` functions in its host API:
+Supported `elem_size`: **2** (bfloat16/uint16/f16) and **4** (float32/uint32/i32).
+`1` is not pre-instantiated in `libtt_metal.so` and would require adding template instantiations.
+
+### 3b. 2-arg TensorAccessor fix — 0xBF80 root cause resolved
+
+The TT-Metal interleaved memory documentation uses the **3-arg** constructor,
+but the WORKING `dram_loopback` example uses **2-arg**. The 3-arg version
+computes incorrect DRAM addresses (produces uniform `0xBF80`). Switched back to 2-arg:
 
 ```cpp
-// Before writing input to device
-src0_vec = tilize_nfaces(src0_vec, M, K);  // row-major → tile layout
+// 2-arg — WORKS (matches dram_loopback example)
+const auto in0 = TensorAccessor(in0_args, in0_addr);
 
-// After reading output from device
-result_vec = untilize_nfaces(result_vec, M, N);  // tile layout → row-major
+// 3-arg — BROKEN (shown in memory docs but produces 0xBF80)
+const auto in0 = TensorAccessor(in0_args, addr, get_tile_size(cb_id));
 ```
 
-These are not yet bound in `libtt-metal-cxx`. Options:
-- **A**: Add `tilize` / `untilize` Rust wrappers to `libtt-metal-cxx`
-- **B**: Implement tilization in pure Rust (the format is documented in TT-Metal source)
-- **C**: Use TT-Metal's `tilize` / `untilize` device-side operations (kernels that do the conversion on-device)
+- `cubecl-cpp/src/tt_metal/reader.rs` — 2-arg `TensorAccessor(args, addr)`
+- `cubecl-cpp/src/tt_metal/writer.rs` — 2-arg `TensorAccessor(args, addr)`
 
-Recommendation: **Option A** — add thin wrappers. The TT-Metal headers provide these as host utility functions.
+### 3c. Tests
 
-### 3b. Wire tilization into `Command::write_to_gpu` / read
-- `write_to_gpu`: tilize the host data before calling `write_mesh_buffer`
-- Read path: call `untilize_nfaces` after `read_mesh_buffer`
+All 9 tests pass: `TT_METAL_RUN_HARDWARE_TESTS=1 LD_LIBRARY_PATH=/usr/local/lib cargo test -p cubecl-tt-metal -- --nocapture --test-threads=1`
 
-### 3c. Tile-aligned tensor dimensions
-CubeCL tensor shapes must be padded to tile boundaries (multiples of 32). The `TtStorage::alloc` already rounds up, but shape metadata needs updating.
+| Test | What it verifies | Hardware |
+|------|-----------------|----------|
+| `tilize_untilize_round_trip` | Host-side tilize→untilize preserves data | No |
+| `buffer_write_read_round_trip` | Raw MeshBuffer write→read round-trips | Yes |
+| `dram_loopback_round_trip` | Single-kernel DRAM→CB→DRAM with verification | Yes |
+| `kernel_copy_round_trip` | Single-kernel copy with data verify | Yes |
+| `kernel_copy_tilized_round_trip` | Single-kernel copy tilized with data verify | Yes |
+| `kernel_compile_and_execute` | Three-kernel pipeline compiles + executes | Yes |
+| `two_kernel_passthrough` | Reader + writer sharing CB 0 (no compute) ✅ | Yes |
+| `three_kernel_copy_raw` | Reader + compute(copy_tile) + writer, raw data, verified ✅ | Yes |
+| `three_kernel_copy_tilized` | Reader + compute(copy_tile) + writer, tilized data, verified ✅ | Yes |
 
-### Test
-Extend `copy_tile_round_trip` to verify output bytes match input after tilization/untilization.
+### 3d. Three-kernel pipeline — RESOLVED ✅
 
-**Resources**:
-- TT-Metal docs — matmul example shows `tilize_nfaces` / `untilize_nfaces` usage: https://docs.tenstorrent.com/tt-metal/latest/tt-metalium/tt_metal/examples/matmul_single_core.html
-- TT-Metal source for tilization: `tt_metal/tt_metal/impl/` — look for `tilize_nfaces`
-- Understanding TT tile format: https://github.com/tenstorrent/tt-metal/blob/main/METALIUM_GUIDE.md#native-tile-based-computing
+**Root cause**: The compute kernel was missing `binary_op_init_common(cb_in0, cb_in0, cb_out0)`.
+This function configures the Unpack/Math/Pack cores for the CB data format.
+Without it, `copy_tile` produces garbage (0xBF80) regardless of tilization.
+
+**Fix**: Added `binary_op_init_common` + `copy_tile_init` before the compute loop
+in `generate_copy_compute_source()`. Both `generate_add_compute_source()` already
+had the correct init pattern (`binary_op_init_common` + `add_tiles_init`).
+
+**Tests verifying the fix**:
+| Test | What it verifies |
+|------|-----------------|
+| `two_kernel_passthrough` | Reader + writer sharing CB 0 (no compute) — proves reader/writer work |
+| `three_kernel_copy_raw` | Reader + compute(copy_tile) + writer with raw data — ✅ passes |
+| `three_kernel_copy_tilized` | Same with tilized data — ✅ passes |
+
+**Key takeaway**: Every TT-Metal compute kernel MUST call an init function
+(`binary_op_init_common`, `mm_init`, etc.) before the compute loop to configure
+the hardware engines for the CB data format.
 
 ---
 
 ## 🔴 Next — Phase 4: IR-Driven Compute Kernel
 
-**Current state**: The compute kernel is a hardcoded `copy_tile` template (`writer.rs::generate_copy_compute_source`). The CubeCL IR pipeline is not used.
+**Current state**: The compute kernel is a hardcoded `copy_tile` template
+(`writer.rs::generate_copy_compute_source`). The CubeCL IR pipeline is not used.
 
-**Goal**: A CubeCL `#[cube]` kernel written in Rust compiles through `CppCompiler<TtMetalDialect>` and runs on TT hardware.
+**Goal**: A CubeCL `#[cube]` kernel written in Rust compiles through
+`CppCompiler<TtMetalDialect>` and runs on TT hardware.
 
 ### 4a. `DialectBindings::compile_kernel_signature`
-Currently emits `void kernel_main()`. Must emit proper kernel entry point with runtime args via `get_arg_val<uint32_t>(N)`. The `kernel_main` signature is standard for TT kernels.
+Currently emits `void kernel_main()`. Must emit proper kernel entry point with
+runtime args via `get_arg_val<uint32_t>(N)`. The `kernel_main` signature is
+standard for TT kernels.
 
 ### 4b. `DialectInstructions` — op mapping
 Map CubeCL IR ops to TT compute API calls. The first ops to implement:
@@ -134,7 +166,9 @@ tile_regs_release();
 ```
 
 ### 4c. `DialectCubeBuiltins` — SIMT → SPSD mapping
-CubeCL uses `UNIT_POS_X` (thread index within a block). TT has no threads — it processes tiles sequentially on a single RISC-V. The `cube_dim` maps to tile count. Implementation:
+CubeCL uses `UNIT_POS_X` (thread index within a block). TT has no threads —
+it processes tiles sequentially on a single RISC-V. The `cube_dim` maps to
+tile count. Implementation:
 - `UNIT_POS_X` → loop variable `i`
 - `CUBE_DIM_X` → `num_tiles` from runtime arg
 - `CUBE_POS_X` → `0` (single core)
@@ -148,13 +182,17 @@ Already stubbed. Must include the right headers based on which ops are used:
 - `#include "compute_kernel_api/eltwise_unary/sfpu_trigonometry.h"` — for SFPU functions like `sin_tile`
 
 ### 4e. `KernelDefinition` → `TtKernelSources`
-Wire `CppCompiler<TtMetalDialect>` to produce a `TtKernelSources` from a CubeCL `KernelDefinition`. Currently the compiler produces a single `ComputeKernel` with one source string. We need to:
+Wire `CppCompiler<TtMetalDialect>` to produce a `TtKernelSources` from a CubeCL
+`KernelDefinition`. Currently the compiler produces a single `ComputeKernel`
+with one source string. We need to:
 - Call `CppCompiler::compile()` to get the compute kernel source
-- Generate reader/writer sources from templates (parameterized by input/output count from the IR analysis)
+- Generate reader/writer sources from templates (parameterized by input/output
+  count from the IR analysis)
 - Return a `TtKernelSources`
 
 ### Test
-A CubeCL kernel (`#[cube]`) that adds two tensors, compiled through the full pipeline and executed on hardware.
+A CubeCL kernel (`#[cube]`) that adds two tensors, compiled through the full
+pipeline and executed on hardware.
 
 **Resources**:
 - HIP compute kernel generation: `crates/cubecl-cpp/src/hip/dialect.rs` — reference for how `DialectInstructions` methods are structured
@@ -175,13 +213,17 @@ Currently `TtServer::launch` is a stub. Must:
 - Enqueue workload
 
 ### 5b. `TtServer::read` / `write` — through CubeCL memory model
-Currently the read/write in `Command` uses raw `MeshBuffer` addresses from `TtResource`. Must integrate with CubeCL's `Binding` / `CopyDescriptor` / `MemoryManagement` system so that data flows:
+Currently the read/write in `Command` uses raw `MeshBuffer` addresses from
+`TtResource`. Must integrate with CubeCL's `Binding` / `CopyDescriptor` /
+`MemoryManagement` system so that data flows:
 ```
 host → ComputeClient.write() → TtServer.write() → Command.write_to_gpu → MeshDevice.write_mesh_buffer
 ```
 
 ### 5c. Enable `testgen!()` macros
-Uncomment the `testgen!()` / `testgen_all!()` macros in `src/lib.rs` once the IR pipeline works end-to-end. These run the CubeCL standard test suite against the TT backend.
+Uncomment the `testgen!()` / `testgen_all!()` macros in `src/lib.rs` once the
+IR pipeline works end-to-end. These run the CubeCL standard test suite against
+the TT backend.
 
 ---
 
@@ -213,8 +255,10 @@ APIs not yet wrapped that the backend will need:
 
 | Feature | Priority | Notes |
 |---------|----------|-------|
-| `tilize_nfaces` / `untilize_nfaces` | HIGH | Needed for Phase 3 |
-| `TensorAccessorArgs` Rust wrapper | MEDIUM | Currently passed as raw `u32` compile args |
+| `tilize_nfaces` / `untilize_nfaces` | ✅ DONE | Phase 3 — `libtt_metal_cxx::tilize()` / `untilize()` |
+| `MeshBuffer::compile_args()` (TensorAccessorArgs auto-gen) | ✅ DONE | Phase 4 prereq — `MeshBuffer::compile_args()` |
+| `generate_dram_loopback_source()` | ✅ DONE | Single-kernel DRAM→CB→DRAM copy template |
+| Reader+compute+writer with tilization | 🔴 | For operations needing compute kernel (add, mul, etc.) |
 | Multi-device mesh (non-unit) | MEDIUM | Currently only `MeshDevice::create_unit_mesh` |
 | `CommandQueue` / async enqueue | LOW | MVP uses blocking; async for perf |
 | Profiler APIs | LOW | `ReadMeshDeviceProfilerResults`, etc. |
@@ -227,10 +271,10 @@ APIs not yet wrapped that the backend will need:
 # Build everything
 cargo build -p cubecl --features tt_metal
 
-# Run the copy kernel test (requires TT hardware)
+# Run all TT backend tests (requires TT hardware)
 TT_METAL_RUN_HARDWARE_TESTS=1 \
 LD_LIBRARY_PATH=/usr/local/lib \
-cargo test -p cubecl-tt-metal copy_tile_round_trip -- --nocapture
+cargo test -p cubecl-tt-metal -- --nocapture
 
 # Run libtt-metal-cxx binding tests
 TT_METAL_RUN_HARDWARE_TESTS=1 cargo test -p libtt-metal-cxx mesh_buffer
@@ -243,19 +287,42 @@ cargo check -p cubecl --features tt_metal
 
 ## Key Learnings
 
-### TensorAccessorArgs compile-time args
-Each `TensorAccessorArgs<N>` in a kernel reads 2 compile-time args:
-- `args[CTA_OFFSET]`: `ArgConfig` flags (`Sharded=1`, `IsDram=2`, `None=0`)
-- `args[CTA_OFFSET+1]`: `AlignedPageSize` (tile size in bytes)
+### 2-arg vs 3-arg TensorAccessor — THE ROOT CAUSE OF 0xBF80
 
-For non-sharded interleaved DRAM: pass `[2, tile_size_bytes]` via `DataMovementKernelConfig::add_compile_arg()`.
+The TT-Metal interleaved memory documentation uses the **3-arg** constructor:
+```cpp
+TensorAccessor(args, addr, get_tile_size(cb_id));  // BROKEN for our case
+```
+But the WORKING `dram_loopback` example uses the **2-arg** version:
+```cpp
+TensorAccessor(args, addr);  // WORKS
+```
+**The 3-arg version computes wrong DRAM addresses**, causing `noc_async_read_tile`
+to read uniform `0xBF80`. The 2-arg version (relying on `AlignedPageSize` from
+compile-time args) works correctly.
 
-These are defined in:
-- `tt_metal/hw/inc/api/tensor/tensor_accessor_args.h` (kernel side)
-- `tt_metal/hostdevcommon/api/hostdevcommon/tensor_accessor/arg_config.hpp` (ArgConfig enum)
+All reader/writer kernels now use 2-arg. The dram_loopback test proves
+data round-trips correctly.
+
+### `copy_tile` / tile compute ops transform data
+
+Even with correct DRAM addressing (2-arg TensorAccessor), the compute kernel's
+`copy_tile` for `Float16B` format rearranges bytes within tiles (face swizzling /
+tile format conversion). **Data must be tilized** before passing through tile
+compute operations, and untilized after.
+
+The simplest working pattern (dram_loopback) avoids compute ops entirely:
+- Single data-movement kernel, no compute kernel
+- `noc_async_read_tile` → CB scratch → `noc_async_write_tile`
+- No `copy_tile`/`pack_tile`/`tile_regs_acquire`
+- Processor: `RISCV_0`, NOC: `RISCV_0_default`
+- 2-arg `TensorAccessor(args, addr)`
 
 ### MeshDevice ownership
-`MeshDevice` wraps a `cxx::UniquePtr` and cannot be cloned or shared. The current pattern stores it in `TtServer` and uses raw pointers (`*const MeshDevice`) in `TtContext` and `TtStorage`. These pointers are safe because `TtServer` outlives all its components.
+`MeshDevice` wraps a `cxx::UniquePtr` and cannot be cloned or shared. The
+current pattern stores it in `TtServer` and uses raw pointers
+(`*const MeshDevice`) in `TtContext` and `TtStorage`. These pointers are safe
+because `TtServer` outlives all its components.
 
 ### CB indices
 - Input CBs: indices `0, 1, 2, ...`
@@ -263,10 +330,32 @@ These are defined in:
 - The compute kernel uses `tt::CBIndex::c_0` etc. for CB references
 
 ### Data format
-TT-Metal's `DataFormat::Float16_b` (value 5) is bfloat16 — the default for most compute operations.
+TT-Metal's `DataFormat::Float16_b` (value 5) is bfloat16 — the default for
+most compute operations.
 
 ### JIT caching
-TT-Metal caches compiled kernels in `~/.cache/tt_metal/`. Kernel sources are hashed; identical sources get cache hits. Cached kernels show as "JIT cache stats: 8/8 hits (100.0%)".
+TT-Metal caches compiled kernels in `~/.cache/tt_metal/`. Kernel sources are
+hashed; identical sources get cache hits. Cached kernels show as
+"JIT cache stats: 8/8 hits (100.0%)".
+
+### Data round-trip diagnostic findings (0xBF80 issue) — RESOLVED
+
+**Root cause**: The 3-arg `TensorAccessor(args, addr, get_tile_size(cb))` constructor
+computes incorrect DRAM addresses. Switching to the 2-arg version
+`TensorAccessor(args, addr)` fixes the issue.
+
+Secondary issue: `copy_tile` for `Float16B` format rearranges bytes within tiles.
+Data must be tilized before compute operations.
+
+**Working test**: `dram_loopback_round_trip` — single-kernel DRAM→CB→DRAM copy
+proves data round-trips correctly with 2-arg TensorAccessor and no compute ops.
+
+**How we found it**: The TT-Metal source at `tt_metal/programming_examples/loopback/`
+uses a single data-movement kernel with `TensorAccessor(args, addr)` (2-arg) —
+NOT the 3-arg version shown in the interleaved memory documentation. Mirroring
+this exact pattern in our bindings solved the issue.
+
+Reference: `../tt-metal/tt_metal/programming_examples/loopback/loopback.cpp` + `kernels/loopback_dram_copy.cpp`
 
 ---
 
@@ -276,6 +365,8 @@ TT-Metal caches compiled kernels in `~/.cache/tt_metal/`. Kernel sources are has
 - Architecture & Programming Model: https://github.com/tenstorrent/tt-metal/blob/main/METALIUM_GUIDE.md
 - Single-core matmul example: https://docs.tenstorrent.com/tt-metal/latest/tt-metalium/tt_metal/examples/matmul_single_core.html
 - Compute API reference: https://docs.tenstorrent.com/tt-metal/latest/tt-metalium/tt_metal/apis/kernel_apis/compute/index.html
+- Advanced Topics: tiles, memory, compute engines: https://docs.tenstorrent.com/tt-metal/latest/tt-metalium/tt_metal/advanced_topics/index.html
+- Memory for kernel developers (interleaved, TensorAccessor): https://docs.tenstorrent.com/tt-metal/latest/tt-metalium/tt_metal/advanced_topics/memory_for_kernel_developers.html
 
 ### TT-Metal Source (on disk at `../tt-metal/`)
 - `tt_metal/hw/inc/api/tensor/tensor_accessor_args.h` — TensorAccessorArgs template (kernel side)
@@ -283,6 +374,8 @@ TT-Metal caches compiled kernels in `~/.cache/tt_metal/`. Kernel sources are has
 - `tt_metal/hw/inc/api/tensor/tensor_accessor.h` — TensorAccessor constructors
 - `tt_metal/api/tt-metalium/distributed.hpp` — `EnqueueWriteMeshBuffer`, `EnqueueReadMeshBuffer`
 - `tt_metal/api/tt-metalium/mesh_buffer.hpp` — MeshBuffer API
+- `tt_metal/api/tt-metalium/tilize_utils.hpp` — `tilize_nfaces` / `untilize_nfaces` declarations
+- `tt_metal/impl/data_format/tilize_utils.cpp` — tilize/untilize implementation + explicit instantiations
 - `tt_metal/programming_examples/` — working reference examples
 
 ### CubeCL Reference

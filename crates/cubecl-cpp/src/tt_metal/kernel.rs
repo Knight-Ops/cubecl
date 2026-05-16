@@ -9,11 +9,6 @@ pub struct TtKernelSources {
     pub num_tiles: u32,
     pub tile_size_bytes: u32,
     pub data_format_tt: u8,
-    /// Compile-time args for the reader data movement kernel.
-    /// Each input buffer needs 2 compile-time args: [ArgConfig flags, AlignedPageSize].
-    pub reader_compile_args: Vec<u32>,
-    /// Compile-time args for the writer data movement kernel.
-    pub writer_compile_args: Vec<u32>,
 }
 
 impl TtKernelSources {
@@ -28,9 +23,20 @@ impl TtKernelSources {
             num_tiles,
             tile_size_bytes,
             data_format_tt: 5, // Float16_b
-            // ArgConfig for non-sharded DRAM: IsDram = 2
-            reader_compile_args: vec![2, tile_size_bytes],
-            writer_compile_args: vec![2, tile_size_bytes],
+        }
+    }
+
+    /// Create sources for an element-wise addition kernel (2 inputs → 1 output).
+    pub fn add_kernel(num_tiles: u32, tile_size_bytes: u32) -> Self {
+        Self {
+            reader_source: super::reader::generate_reader_source(2),
+            compute_source: super::writer::generate_add_compute_source(),
+            writer_source: super::writer::generate_writer_source(1),
+            num_inputs: 2,
+            num_outputs: 1,
+            num_tiles,
+            tile_size_bytes,
+            data_format_tt: 5, // Float16_b
         }
     }
 }
