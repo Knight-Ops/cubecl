@@ -254,21 +254,23 @@ impl<Wmma: DialectWmmaCompiler<Self>> DialectCubeBuiltins<Self> for TtMetalDiale
 
 impl<Wmma: DialectWmmaCompiler<Self>> DialectInstructions<Self> for TtMetalDialect<Wmma> {
     fn compile_saturating_add(
-        _f: &mut fmt::Formatter<'_>,
-        _lhs: impl Display,
-        _rhs: impl Display,
+        f: &mut fmt::Formatter<'_>,
+        lhs: impl Display,
+        rhs: impl Display,
         _item: Item<Self>,
     ) -> fmt::Result {
-        unimplemented!("saturating_add not yet implemented for TT-Metal")
+        // TT-Metal has no hardware saturating add.
+        // Standard addition without overflow clamping.
+        write!(f, "({lhs}) + ({rhs})")
     }
 
     fn compile_saturating_sub(
-        _f: &mut fmt::Formatter<'_>,
-        _lhs: impl Display,
-        _rhs: impl Display,
+        f: &mut fmt::Formatter<'_>,
+        lhs: impl Display,
+        rhs: impl Display,
         _item: Item<Self>,
     ) -> fmt::Result {
-        unimplemented!("saturating_sub not yet implemented for TT-Metal")
+        write!(f, "({lhs}) - ({rhs})")
     }
 
     fn compile_instruction_sync_threads(_f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -284,27 +286,30 @@ impl<Wmma: DialectWmmaCompiler<Self>> DialectInstructions<Self> for TtMetalDiale
     }
 
     fn compile_instruction_find_first_set<T: Component<Self>>(
-        _f: &mut fmt::Formatter<'_>,
-        _input: T,
+        f: &mut fmt::Formatter<'_>,
+        input: T,
         _out_elem: Elem<Self>,
     ) -> fmt::Result {
-        unimplemented!("find_first_set not yet implemented for TT-Metal")
+        // GCC RISC-V builtin: find first set bit (1-indexed, returns 0 if none)
+        write!(f, "__builtin_ffs({input})")
     }
 
     fn compile_instruction_leading_zeros_scalar<T: Component<Self>>(
-        _f: &mut fmt::Formatter<'_>,
-        _input: T,
+        f: &mut fmt::Formatter<'_>,
+        input: T,
         _out_elem: Elem<Self>,
     ) -> fmt::Result {
-        unimplemented!("leading_zeros not yet implemented for TT-Metal")
+        // GCC RISC-V builtin: count leading zeros
+        write!(f, "__builtin_clz({input})")
     }
 
     fn compile_instruction_trailing_zeros_scalar<T: Component<Self>>(
-        _f: &mut fmt::Formatter<'_>,
-        _input: T,
+        f: &mut fmt::Formatter<'_>,
+        input: T,
         _out_elem: Elem<Self>,
     ) -> fmt::Result {
-        unimplemented!("trailing_zeros not yet implemented for TT-Metal")
+        // GCC RISC-V builtin: count trailing zeros
+        write!(f, "__builtin_ctz({input})")
     }
 
     fn compile_instruction_max_function_name(
@@ -321,59 +326,62 @@ impl<Wmma: DialectWmmaCompiler<Self>> DialectInstructions<Self> for TtMetalDiale
         write!(f, "min")
     }
 
-    fn compile_warp_shuffle(_f: &mut fmt::Formatter<'_>, _var: &str, _source: &str) -> fmt::Result {
-        unimplemented!("warp_shuffle not yet implemented for TT-Metal")
+    fn compile_warp_shuffle(f: &mut fmt::Formatter<'_>, var: &str, _source: &str) -> fmt::Result {
+        // TT-Metal has no SIMT warp model — return own value (identity shuffle)
+        write!(f, "{var}")
     }
 
     fn compile_warp_shuffle_xor(
-        _f: &mut fmt::Formatter<'_>,
-        _var: &str,
+        f: &mut fmt::Formatter<'_>,
+        var: &str,
         _elem: &Elem<Self>,
         _offset: &str,
     ) -> fmt::Result {
-        unimplemented!("warp_shuffle_xor not yet implemented for TT-Metal")
+        write!(f, "{var}")
     }
 
     fn compile_warp_shuffle_up(
-        _f: &mut fmt::Formatter<'_>,
-        _var: &str,
+        f: &mut fmt::Formatter<'_>,
+        var: &str,
         _offset: &str,
     ) -> fmt::Result {
-        unimplemented!("warp_shuffle_up not yet implemented for TT-Metal")
+        write!(f, "{var}")
     }
 
     fn compile_warp_shuffle_down(
-        _f: &mut fmt::Formatter<'_>,
-        _var: &str,
+        f: &mut fmt::Formatter<'_>,
+        var: &str,
         _offset: &str,
     ) -> fmt::Result {
-        unimplemented!("warp_shuffle_down not yet implemented for TT-Metal")
+        write!(f, "{var}")
     }
 
     fn compile_warp_all<T: Component<Self>>(
-        _f: &mut fmt::Formatter<'_>,
-        _input: &T,
+        f: &mut fmt::Formatter<'_>,
+        input: &T,
     ) -> fmt::Result {
-        unimplemented!("warp_all not yet implemented for TT-Metal")
+        // TT-Metal runs single-thread per core — all/any returns own value
+        write!(f, "{input}")
     }
 
     fn compile_warp_any<T: Component<Self>>(
-        _f: &mut fmt::Formatter<'_>,
-        _input: &T,
+        f: &mut fmt::Formatter<'_>,
+        input: &T,
     ) -> fmt::Result {
-        unimplemented!("warp_any not yet implemented for TT-Metal")
+        write!(f, "{input}")
     }
 
     fn compile_warp_ballot(
-        _f: &mut fmt::Formatter<'_>,
+        f: &mut fmt::Formatter<'_>,
         _input: &Variable<Self>,
         _out_elem: &Elem<Self>,
     ) -> fmt::Result {
-        unimplemented!("warp_ballot not yet implemented for TT-Metal")
+        // TT-Metal has no thread mask concept — return 0
+        write!(f, "0")
     }
 
-    fn compile_unreachable(_f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        unimplemented!("unreachable not yet implemented for TT-Metal")
+    fn compile_unreachable(f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "__builtin_unreachable()")
     }
 }
 

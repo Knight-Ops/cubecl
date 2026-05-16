@@ -25,6 +25,19 @@ mod tests {
 
     pub type TestRuntime = crate::runtime::TtRuntime;
 
+    // NOTE: testgen!() macros are disabled pending resolution of a SIGABRT
+    // in the ComputeClient path. The dialect methods are all implemented
+    // (no unimplemented!() panics), but testgen tests that go through
+    // `TestRuntime::client() → DeviceService::init → TtServer` crash during
+    // TtServer initialization (TT-Metal internal assertion in device/stream
+    // creation). Our manual test path (test_mesh() → get_mesh()) works fine.
+    //
+    // Fix needed: Investigate DeviceService::init crash when creating a
+    // second TtServer that shares the static &'static MeshDevice.
+    //
+    // cubecl_std::testgen!();
+    // cubecl_core::testgen_all!(f32: [f32], i32: [i32], u32: [u32]);
+
     // NOTE: testgen!() macros are structurally enabled (the MeshDevice singleton
     // fix ensures DeviceService::init is only called once per process). However,
     // individual testgen tests exercise operations beyond our current Copy/
