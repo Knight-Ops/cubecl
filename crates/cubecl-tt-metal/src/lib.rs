@@ -14,6 +14,7 @@ pub type TtWmmaCompiler = cubecl_cpp::tt_metal::TtNoWmma;
 
 #[cfg(test)]
 mod tests {
+    use crate::runtime::get_mesh;
     use cubecl_cpp::tt_metal::{TtKernelSources, reader};
     use libtt_metal_cxx::{
         CircularBufferConfig, ComputeKernelConfig, CoreRangeSet, DataFormat,
@@ -24,14 +25,23 @@ mod tests {
 
     pub type TestRuntime = crate::runtime::TtRuntime;
 
-    // NOTE: testgen!() macros are disabled until broader dialect operation
-    // support is implemented (atan2, hypot, pow, atomics, comparisons, enums).
-    // Currently only Copy and EltwiseBinaryAdd operations are supported.
+    // NOTE: testgen!() macros are structurally enabled (the MeshDevice singleton
+    // fix ensures DeviceService::init is only called once per process). However,
+    // individual testgen tests exercise operations beyond our current Copy/
+    // EltwiseBinaryAdd dialect support (mulhi, atan2, hypot, atomics, etc.).
+    // These crash because the dialect stubs use unimplemented!().
+    //
+    // Enable testgen once broader dialect operation support is implemented.
+    //
     // cubecl_std::testgen!();
     // cubecl_core::testgen_all!(f32: [f32], i32: [i32], u32: [u32]);
 
     fn hardware_tests_enabled() -> bool {
         env::var_os("TT_METAL_RUN_HARDWARE_TESTS").is_some()
+    }
+
+    fn test_mesh() -> &'static MeshDevice {
+        get_mesh()
     }
 
     // ── Standalone tilization test (no GPU needed) ────────────────────────
@@ -75,7 +85,7 @@ mod tests {
         if !hardware_tests_enabled() {
             return;
         }
-        let mut mesh = MeshDevice::create_unit_mesh(0).expect("should open unit mesh");
+        let mesh = test_mesh();
         const BUF_SIZE: u64 = 4096;
         let buf = MeshBuffer::create_replicated(&mesh, BUF_SIZE, BUF_SIZE, 0)
             .expect("buffer should allocate");
@@ -88,7 +98,6 @@ mod tests {
         let mut output = vec![0u8; BUF_SIZE as usize];
         mesh.read_mesh_buffer(&buf, &mut output).expect("read");
         assert_eq!(input, output, "raw buffer write/read round-trip");
-        assert!(mesh.close().expect("mesh should close"));
     }
 
     // ── Phase 5d: CubeTask compilation pipeline ─────────────────────────
@@ -98,7 +107,7 @@ mod tests {
         if !hardware_tests_enabled() {
             return;
         }
-        let mut mesh = MeshDevice::create_unit_mesh(0).expect("should open unit mesh");
+        let mesh = test_mesh();
 
         const TILE_SIZE: u32 = 32 * 32 * 2;
         const NUM_TILES: u32 = 2;
@@ -119,7 +128,7 @@ mod tests {
 
         // Build a KernelDefinition and wrap it in a CubeTask-compatible struct
         let kernel_def = build_empty_kernel(1, 1);
-        let mut server = crate::compute::server::TtServer::from_mesh_boxed(Box::new(mesh));
+        let mut server = crate::compute::server::TtServer::from_singleton();
         let stream_id = cubecl_common::stream_id::StreamId::current();
 
         // Compile through the CubeTask pipeline
@@ -164,7 +173,7 @@ mod tests {
         if !hardware_tests_enabled() {
             return;
         }
-        let mut mesh = MeshDevice::create_unit_mesh(0).expect("should open unit mesh");
+        let mesh = test_mesh();
 
         const TILE_SIZE: u32 = 32 * 32 * 2;
         const NUM_TILES: u32 = 2;
@@ -246,8 +255,6 @@ mod tests {
             "copy kernel: {}/{} mismatches",
             mismatches, num_u16
         );
-
-        assert!(mesh.close().expect("mesh should close"));
     }
 
     // ── Kernel copy tilized round-trip test (dram_loopback style) ─────────
@@ -258,7 +265,7 @@ mod tests {
         if !hardware_tests_enabled() {
             return;
         }
-        let mut mesh = MeshDevice::create_unit_mesh(0).expect("should open unit mesh");
+        let mesh = test_mesh();
 
         const M: u32 = 64;
         const N: u32 = 64;
@@ -347,8 +354,6 @@ mod tests {
             "tilized copy kernel: {}/{} mismatches",
             mismatches, num_elements
         );
-
-        assert!(mesh.close().expect("mesh should close"));
     }
 
     // ── Original kernel compile + execute test ─────────────────────────────
@@ -358,7 +363,7 @@ mod tests {
         if !hardware_tests_enabled() {
             return;
         }
-        let mut mesh = MeshDevice::create_unit_mesh(0).expect("should open unit mesh");
+        let mesh = test_mesh();
 
         const TILE_SIZE: u32 = 32 * 32 * 2;
         const NUM_TILES: u32 = 2;
@@ -463,8 +468,6 @@ mod tests {
             .expect("workload should accept program");
         mesh.enqueue_workload(&mut workload, true)
             .expect("workload should enqueue");
-
-        assert!(mesh.close().expect("mesh should close"));
     }
 
     // ── Isolation test: reader + writer (no compute kernel) ───────────────
@@ -475,7 +478,7 @@ mod tests {
         if !hardware_tests_enabled() {
             return;
         }
-        let mut mesh = MeshDevice::create_unit_mesh(0).expect("should open unit mesh");
+        let mesh = test_mesh();
 
         const TILE_SIZE: u32 = 32 * 32 * 2;
         const NUM_TILES: u32 = 2;
@@ -590,8 +593,6 @@ void kernel_main() {
                 mismatches, num_u16, all_bf80
             );
         }
-
-        assert!(mesh.close().expect("mesh should close"));
     }
 
     // ── Three-kernel pipeline: raw data round-trip ─────────────────────────
@@ -602,7 +603,7 @@ void kernel_main() {
         if !hardware_tests_enabled() {
             return;
         }
-        let mut mesh = MeshDevice::create_unit_mesh(0).expect("should open unit mesh");
+        let mesh = test_mesh();
 
         const TILE_SIZE: u32 = 32 * 32 * 2;
         const NUM_TILES: u32 = 2;
@@ -723,8 +724,6 @@ void kernel_main() {
                 mismatches, num_u16, all_bf80
             );
         }
-
-        assert!(mesh.close().expect("mesh should close"));
     }
 
     // ── Three-kernel pipeline: tilized data round-trip ─────────────────────
@@ -735,7 +734,7 @@ void kernel_main() {
         if !hardware_tests_enabled() {
             return;
         }
-        let mut mesh = MeshDevice::create_unit_mesh(0).expect("should open unit mesh");
+        let mesh = test_mesh();
 
         // 64×64 bfloat16 — tile-aligned
         const M: u32 = 64;
@@ -865,8 +864,6 @@ void kernel_main() {
             "three-kernel tilized: {}/{} mismatches",
             mismatches, NUM_ELEMENTS
         );
-
-        assert!(mesh.close().expect("mesh should close"));
     }
 
     // ── IR pipeline: copy detection ───────────────────────────────────────
@@ -877,7 +874,7 @@ void kernel_main() {
         if !hardware_tests_enabled() {
             return;
         }
-        let mut mesh = MeshDevice::create_unit_mesh(0).expect("should open unit mesh");
+        let mesh = test_mesh();
 
         const TILE_SIZE: u32 = 32 * 32 * 2;
         const NUM_TILES: u32 = 2;
@@ -994,8 +991,6 @@ void kernel_main() {
             "IR pipeline copy: {}/{} mismatches",
             mismatches, num_u16
         );
-
-        assert!(mesh.close().expect("mesh should close"));
     }
 
     // ── IR pipeline: add detection ────────────────────────────────────────
@@ -1006,7 +1001,7 @@ void kernel_main() {
         if !hardware_tests_enabled() {
             return;
         }
-        let mut mesh = MeshDevice::create_unit_mesh(0).expect("should open unit mesh");
+        let mesh = test_mesh();
 
         const TILE_SIZE: u32 = 32 * 32 * 2;
         const NUM_TILES: u32 = 2;
@@ -1163,8 +1158,6 @@ void kernel_main() {
             "IR pipeline add: {}/{} mismatches",
             mismatches, num_u16
         );
-
-        assert!(mesh.close().expect("mesh should close"));
     }
 
     // ── Helpers for building KernelDefinition ─────────────────────────────

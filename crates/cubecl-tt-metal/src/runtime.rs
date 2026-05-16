@@ -25,6 +25,31 @@ use cubecl_runtime::{
     allocator::ContiguousMemoryLayoutPolicy, client::ComputeClient, logging::ServerLogger,
 };
 use std::sync::Arc;
+use std::sync::OnceLock;
+
+/// Wrapper around `Box<MeshDevice>` that implements `Sync`.
+///
+/// SAFETY: `MeshDevice` is only accessed from one thread at a time
+/// (serialized by `CubeCL`'s `DeviceHandle` mutex). The `OnceLock`
+/// ensures single initialization.
+struct MeshSingleton(Box<libtt_metal_cxx::MeshDevice>);
+unsafe impl Send for MeshSingleton {}
+unsafe impl Sync for MeshSingleton {}
+
+/// Process-level singleton for the TT-Metal device.
+static MESH_SINGLETON: OnceLock<MeshSingleton> = OnceLock::new();
+
+/// Get (or open) the process-level `MeshDevice`.
+///
+/// The returned reference is valid for the entire program lifetime.
+pub fn get_mesh() -> &'static libtt_metal_cxx::MeshDevice {
+    let wrapper = MESH_SINGLETON.get_or_init(|| {
+        MeshSingleton(Box::new(
+            libtt_metal_cxx::MeshDevice::create_unit_mesh(0).expect("failed to open TT device 0"),
+        ))
+    });
+    &wrapper.0
+}
 
 /// The values that control how a TT-Metal Runtime will perform its calculations.
 #[derive(Default)]
@@ -48,12 +73,9 @@ pub const TT_MAX_BINDINGS: u32 = 16;
 
 impl DeviceService for TtServer {
     fn init(device_id: cubecl_common::device::DeviceId) -> Self {
-        let device = TtDevice::from_id(device_id);
+        let _device = TtDevice::from_id(device_id);
 
-        let mesh = match libtt_metal_cxx::MeshDevice::create_unit_mesh(device.index as i32) {
-            Ok(m) => m,
-            Err(e) => panic!("Failed to open TT device {}: {}", device.index, e.what()),
-        };
+        let mesh: &'static libtt_metal_cxx::MeshDevice = get_mesh();
 
         let arch = cubecl_cpp::tt_metal::TtArchitecture::Wormhole;
         let warp_size = arch.warp_size();
@@ -70,7 +92,7 @@ impl DeviceService for TtServer {
             max_cube_count: (num_cores, 1, 1),
             max_units_per_cube: warp_size * TILE_HEIGHT,
             max_cube_dim: (u32::MAX, 1, 1),
-            num_streaming_multiprocessors: Some(num_cores as u32),
+            num_streaming_multiprocessors: Some(num_cores),
             num_tensor_cores: None,
             min_tensor_cores_dim: None,
             num_cpu_cores: None,
@@ -108,13 +130,7 @@ impl DeviceService for TtServer {
         let utilities = ServerUtilities::new(device_props, logger, (), policy);
         let options = RuntimeOptions::default();
 
-        TtServer::new(
-            Box::new(mesh),
-            ctx,
-            mem_properties,
-            options.memory_config,
-            utilities,
-        )
+        TtServer::new(mesh, ctx, mem_properties, options.memory_config, utilities)
     }
 
     fn utilities(&self) -> ServerUtilitiesHandle {

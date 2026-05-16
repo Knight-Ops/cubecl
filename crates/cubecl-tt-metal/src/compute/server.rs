@@ -33,7 +33,7 @@ use std::sync::Arc;
 
 #[derive(Debug)]
 pub struct TtServer {
-    mesh: Box<libtt_metal_cxx::MeshDevice>,
+    mesh: &'static libtt_metal_cxx::MeshDevice,
     ctx: TtContext,
     streams: MultiStream<TtStreamBackend>,
     utilities: Arc<ServerUtilities<Self>>,
@@ -256,11 +256,14 @@ impl ServerCommunication for TtServer {
 }
 
 impl TtServer {
-    /// Create a `TtServer` from an already-boxed `MeshDevice` (for testing).
+    /// Create a `TtServer` using the process-level `MeshDevice` singleton.
     ///
-    /// The `MeshDevice` must be in a `Box` so its address is stable
-    /// and raw pointers to it remain valid after `TtServer` is moved.
-    pub fn from_mesh_boxed(mesh: Box<libtt_metal_cxx::MeshDevice>) -> Self {
+    /// This is a convenience for tests that need a `TtServer` without going
+    /// through `DeviceService::init`. The underlying `MeshDevice` is obtained
+    /// from `crate::runtime::get_mesh()`.
+    pub fn from_singleton() -> Self {
+        let mesh = crate::runtime::get_mesh();
+
         use cubecl_common::profile::TimingMethod;
         use cubecl_core::ir::{
             DeviceProperties, HardwareProperties, MemoryDeviceProperties, VectorSize,
@@ -325,7 +328,7 @@ impl TtServer {
     }
 
     pub(crate) fn new(
-        mesh: Box<libtt_metal_cxx::MeshDevice>,
+        mesh: &'static libtt_metal_cxx::MeshDevice,
         ctx: TtContext,
         _mem_props: MemoryDeviceProperties,
         _mem_config: MemoryConfiguration,
@@ -334,9 +337,9 @@ impl TtServer {
         let config = CubeClRuntimeConfig::get();
         let max_streams = config.streaming.max_streams;
 
-        // Take a raw pointer to the heap-allocated MeshDevice.
-        // Box guarantees the allocation address is stable even if TtServer is moved.
-        let mesh_ptr: *const libtt_metal_cxx::MeshDevice = &*mesh;
+        // Take a raw pointer to the mesh. Since mesh is &'static,
+        // the pointed-to value lives for the entire program lifetime.
+        let mesh_ptr: *const libtt_metal_cxx::MeshDevice = mesh;
         let backend = TtStreamBackend::new(mesh_ptr);
 
         Self {
@@ -349,7 +352,7 @@ impl TtServer {
 
     /// Access the underlying `MeshDevice`.
     pub fn mesh(&self) -> &libtt_metal_cxx::MeshDevice {
-        &self.mesh
+        self.mesh
     }
 
     /// Compile a `CubeTask` and launch it on the device.
@@ -450,7 +453,7 @@ impl TtServer {
         mode: StreamErrorMode,
     ) -> Result<Command<'_>, ServerError> {
         let streams = self.streams.resolve(stream_id, handles, !mode.ignore)?;
-        Ok(Command::new(&mut self.ctx, &self.mesh, streams))
+        Ok(Command::new(&mut self.ctx, self.mesh, streams))
     }
 
     pub(crate) fn utilities(&self) -> Arc<ServerUtilities<Self>> {
