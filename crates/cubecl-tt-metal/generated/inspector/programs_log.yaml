@@ -1,53 +1,79 @@
 - program_created:
     id: 25
-    timestamp_ns: 1778643521110938586
+    timestamp_ns: 1778903093402369606
 - program_compile_started:
     id: 25
-    timestamp_ns: 1778643521111430302
+    timestamp_ns: 1778903093402778606
 - program_kernel_compile_finished:
     id: 25
-    timestamp_ns: 1778643521111555317
-    duration_ns: 125015
+    timestamp_ns: 1778903093402948026
+    duration_ns: 169420
     watcher_kernel_id: 3
     name: cq_dispatch_subordinate
     path: /home/carl/.cache/tt-metal-cache/7480443082328483327/kernels/cq_dispatch_subordinate/7227152901424362888/
     source: tt_metal/impl/dispatch/kernels/cq_dispatch_subordinate.cpp
 - program_kernel_compile_finished:
     id: 25
-    timestamp_ns: 1778643521111574544
-    duration_ns: 144242
+    timestamp_ns: 1778903093402980467
+    duration_ns: 201861
     watcher_kernel_id: 2
     name: cq_dispatch
     path: /home/carl/.cache/tt-metal-cache/7480443082328483327/kernels/cq_dispatch/304047669242341916/
     source: tt_metal/impl/dispatch/kernels/cq_dispatch.cpp
 - program_kernel_compile_finished:
     id: 25
-    timestamp_ns: 1778643521111592699
-    duration_ns: 162397
+    timestamp_ns: 1778903093403004803
+    duration_ns: 226197
     watcher_kernel_id: 1
     name: cq_prefetch
     path: /home/carl/.cache/tt-metal-cache/7480443082328483327/kernels/cq_prefetch/11681118040740904905/
     source: tt_metal/impl/dispatch/kernels/cq_prefetch.cpp
 - program_compile_finished:
     id: 25
-    timestamp_ns: 1778643521111659223
-    duration_ns: 228921
+    timestamp_ns: 1778903093403093320
+    duration_ns: 314714
 - program_created:
     id: 26
-    timestamp_ns: 1778643521216435736
+    timestamp_ns: 1778903093504198358
 - program_created:
     id: 27
-    timestamp_ns: 1778643521216653837
+    timestamp_ns: 1778903093504366063
 - program_destroyed:
     id: 27
-    timestamp_ns: 1778643521216658265
+    timestamp_ns: 1778903093504368819
 - program_compile_started:
     id: 26
-    timestamp_ns: 1778643521216668425
+    timestamp_ns: 1778903093504376643
 - program_kernel_compile_finished:
     id: 26
-    timestamp_ns: 1778643521251274798
-    duration_ns: 34606373
+    timestamp_ns: 1778903093506079973
+    duration_ns: 1703330
+    watcher_kernel_id: 5
+    name: Kernel_Source_Code
+    path: /home/carl/.cache/tt-metal-cache/7480443082328483327/kernels/Kernel_Source_Code/5280336292146275134/
+    source: #include <cstdint>
+void kernel_main() {
+    uint32_t dst_addr = get_arg_val<uint32_t>(0);
+    uint32_t num_tiles = get_arg_val<uint32_t>(1);
+
+    constexpr uint32_t cb_out = 0;  // read from CB 0, not 16
+
+    constexpr auto c_args = TensorAccessorArgs<0>();
+    const auto c = TensorAccessor(c_args, dst_addr);
+
+    for (uint32_t i = 0; i < num_tiles; i++) {
+        cb_wait_front(cb_out, 1);
+        uint32_t l1_addr = get_read_ptr(cb_out);
+        noc_async_write_tile(i, c, l1_addr);
+        noc_async_write_barrier();
+        cb_pop_front(cb_out, 1);
+    }
+}
+
+- program_kernel_compile_finished:
+    id: 26
+    timestamp_ns: 1778903093506105802
+    duration_ns: 1729159
     watcher_kernel_id: 4
     name: Kernel_Source_Code
     path: /home/carl/.cache/tt-metal-cache/7480443082328483327/kernels/Kernel_Source_Code/17472717039781710656/
@@ -73,39 +99,13 @@ void kernel_main() {
     }
 }
 
-- program_kernel_compile_finished:
-    id: 26
-    timestamp_ns: 1778643521251315173
-    duration_ns: 34646748
-    watcher_kernel_id: 5
-    name: Kernel_Source_Code
-    path: /home/carl/.cache/tt-metal-cache/7480443082328483327/kernels/Kernel_Source_Code/5280336292146275134/
-    source: #include <cstdint>
-void kernel_main() {
-    uint32_t dst_addr = get_arg_val<uint32_t>(0);
-    uint32_t num_tiles = get_arg_val<uint32_t>(1);
-
-    constexpr uint32_t cb_out = 0;  // read from CB 0, not 16
-
-    constexpr auto c_args = TensorAccessorArgs<0>();
-    const auto c = TensorAccessor(c_args, dst_addr);
-
-    for (uint32_t i = 0; i < num_tiles; i++) {
-        cb_wait_front(cb_out, 1);
-        uint32_t l1_addr = get_read_ptr(cb_out);
-        noc_async_write_tile(i, c, l1_addr);
-        noc_async_write_barrier();
-        cb_pop_front(cb_out, 1);
-    }
-}
-
 - program_compile_finished:
     id: 26
-    timestamp_ns: 1778643521269061690
-    duration_ns: 52393265
+    timestamp_ns: 1778903093543701881
+    duration_ns: 39325238
 - program_destroyed:
     id: 25
-    timestamp_ns: 1778643521270778154
+    timestamp_ns: 1778903093545421020
 - program_destroyed:
     id: 26
-    timestamp_ns: 1778643521270849849
+    timestamp_ns: 1778903093545477506

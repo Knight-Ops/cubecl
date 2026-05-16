@@ -33,7 +33,7 @@ use std::sync::Arc;
 
 #[derive(Debug)]
 pub struct TtServer {
-    mesh: libtt_metal_cxx::MeshDevice,
+    mesh: Box<libtt_metal_cxx::MeshDevice>,
     ctx: TtContext,
     streams: MultiStream<TtStreamBackend>,
     utilities: Arc<ServerUtilities<Self>>,
@@ -218,8 +218,11 @@ impl ServerCommunication for TtServer {
 }
 
 impl TtServer {
-    /// Create a `TtServer` from an existing `MeshDevice` (for testing).
-    pub fn from_mesh(mesh: libtt_metal_cxx::MeshDevice) -> Self {
+    /// Create a `TtServer` from an already-boxed `MeshDevice` (for testing).
+    ///
+    /// The `MeshDevice` must be in a `Box` so its address is stable
+    /// and raw pointers to it remain valid after `TtServer` is moved.
+    pub fn from_mesh_boxed(mesh: Box<libtt_metal_cxx::MeshDevice>) -> Self {
         use cubecl_common::profile::TimingMethod;
         use cubecl_core::ir::{
             DeviceProperties, HardwareProperties, MemoryDeviceProperties, VectorSize,
@@ -284,7 +287,7 @@ impl TtServer {
     }
 
     pub(crate) fn new(
-        mesh: libtt_metal_cxx::MeshDevice,
+        mesh: Box<libtt_metal_cxx::MeshDevice>,
         ctx: TtContext,
         _mem_props: MemoryDeviceProperties,
         _mem_config: MemoryConfiguration,
@@ -293,7 +296,10 @@ impl TtServer {
         let config = CubeClRuntimeConfig::get();
         let max_streams = config.streaming.max_streams;
 
-        let backend = TtStreamBackend::new(std::ptr::null());
+        // Take a raw pointer to the heap-allocated MeshDevice.
+        // Box guarantees the allocation address is stable even if TtServer is moved.
+        let mesh_ptr: *const libtt_metal_cxx::MeshDevice = &*mesh;
+        let backend = TtStreamBackend::new(mesh_ptr);
 
         Self {
             mesh,

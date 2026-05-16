@@ -108,7 +108,7 @@ impl DeviceService for TtServer {
         let utilities = ServerUtilities::new(device_props, logger, (), policy);
         let options = RuntimeOptions::default();
 
-        TtServer::new(mesh, ctx, mem_properties, options.memory_config, utilities)
+        TtServer::new(Box::new(mesh), ctx, mem_properties, options.memory_config, utilities)
     }
 
     fn utilities(&self) -> ServerUtilitiesHandle {
