@@ -44,7 +44,7 @@ impl<Wmma: DialectWmmaCompiler<Self>> DialectIncludes<Self> for TtMetalDialect<W
     fn compile_includes(f: &mut fmt::Formatter<'_>, _flags: &Flags<Self>) -> fmt::Result {
         write!(
             f,
-            "#include \"compute_kernel_api.h\"\n#include \"compute_kernel_api/common.h\"\n#include \"compute_kernel_api/eltwise_binary.h\"\n"
+            "#include <limits>\n#include \"api/compute/common.h\"\n#include \"api/compute/compute_kernel_api.h\"\n"
         )
     }
 
@@ -81,7 +81,8 @@ impl<Wmma: DialectWmmaCompiler<Self>> DialectTypes<Self> for TtMetalDialect<Wmma
         _words: bool,
     ) -> fmt::Result {
         match elem {
-            shared::Elem::F16 | shared::Elem::F16x2 => f.write_str("bfloat16"),
+            shared::Elem::F16 => f.write_str("uint16_t"),
+            shared::Elem::F16x2 => f.write_str("uint32_t"),
             shared::Elem::F32 => f.write_str("float"),
             shared::Elem::F64 => f.write_str("double"),
             shared::Elem::BF16 | shared::Elem::BF16x2 => f.write_str("bfloat16"),
@@ -257,20 +258,114 @@ impl<Wmma: DialectWmmaCompiler<Self>> DialectInstructions<Self> for TtMetalDiale
         f: &mut fmt::Formatter<'_>,
         lhs: impl Display,
         rhs: impl Display,
-        _item: Item<Self>,
+        item: Item<Self>,
     ) -> fmt::Result {
-        // TT-Metal has no hardware saturating add.
-        // Standard addition without overflow clamping.
-        write!(f, "({lhs}) + ({rhs})")
+        let lhs = lhs.to_string();
+        let rhs = rhs.to_string();
+        match item.elem {
+            shared::Elem::U8 => write!(
+                f,
+                "(({lhs}) > (std::numeric_limits<uint8_t>::max() - ({rhs})) ? std::numeric_limits<uint8_t>::max() : ({lhs}) + ({rhs}))"
+            ),
+            shared::Elem::U16 => write!(
+                f,
+                "(({lhs}) > (std::numeric_limits<uint16_t>::max() - ({rhs})) ? std::numeric_limits<uint16_t>::max() : ({lhs}) + ({rhs}))"
+            ),
+            shared::Elem::U32 => write!(
+                f,
+                "(({lhs}) > (std::numeric_limits<uint32_t>::max() - ({rhs})) ? std::numeric_limits<uint32_t>::max() : ({lhs}) + ({rhs}))"
+            ),
+            shared::Elem::U64 => write!(
+                f,
+                "(({lhs}) > (std::numeric_limits<uint64_t>::max() - ({rhs})) ? std::numeric_limits<uint64_t>::max() : ({lhs}) + ({rhs}))"
+            ),
+            shared::Elem::I8 => write!(
+                f,
+                "((({rhs}) > 0 && ({lhs}) > (std::numeric_limits<int8_t>::max() - ({rhs}))) ? std::numeric_limits<int8_t>::max() : ((({rhs}) < 0 && ({lhs}) < (std::numeric_limits<int8_t>::min() - ({rhs}))) ? std::numeric_limits<int8_t>::min() : ({lhs}) + ({rhs})))"
+            ),
+            shared::Elem::I16 => write!(
+                f,
+                "((({rhs}) > 0 && ({lhs}) > (std::numeric_limits<int16_t>::max() - ({rhs}))) ? std::numeric_limits<int16_t>::max() : ((({rhs}) < 0 && ({lhs}) < (std::numeric_limits<int16_t>::min() - ({rhs}))) ? std::numeric_limits<int16_t>::min() : ({lhs}) + ({rhs})))"
+            ),
+            shared::Elem::I32 => write!(
+                f,
+                "((({rhs}) > 0 && ({lhs}) > (std::numeric_limits<int32_t>::max() - ({rhs}))) ? std::numeric_limits<int32_t>::max() : ((({rhs}) < 0 && ({lhs}) < (std::numeric_limits<int32_t>::min() - ({rhs}))) ? std::numeric_limits<int32_t>::min() : ({lhs}) + ({rhs})))"
+            ),
+            shared::Elem::I64 => write!(
+                f,
+                "((({rhs}) > 0 && ({lhs}) > (std::numeric_limits<int64_t>::max() - ({rhs}))) ? std::numeric_limits<int64_t>::max() : ((({rhs}) < 0 && ({lhs}) < (std::numeric_limits<int64_t>::min() - ({rhs}))) ? std::numeric_limits<int64_t>::min() : ({lhs}) + ({rhs})))"
+            ),
+            _ => write!(f, "({lhs}) + ({rhs})"),
+        }
     }
 
     fn compile_saturating_sub(
         f: &mut fmt::Formatter<'_>,
         lhs: impl Display,
         rhs: impl Display,
-        _item: Item<Self>,
+        item: Item<Self>,
     ) -> fmt::Result {
-        write!(f, "({lhs}) - ({rhs})")
+        let lhs = lhs.to_string();
+        let rhs = rhs.to_string();
+        match item.elem {
+            shared::Elem::U8 => write!(f, "(({lhs}) < ({rhs}) ? uint8_t(0) : ({lhs}) - ({rhs}))"),
+            shared::Elem::U16 => write!(f, "(({lhs}) < ({rhs}) ? uint16_t(0) : ({lhs}) - ({rhs}))"),
+            shared::Elem::U32 => write!(f, "(({lhs}) < ({rhs}) ? uint32_t(0) : ({lhs}) - ({rhs}))"),
+            shared::Elem::U64 => write!(f, "(({lhs}) < ({rhs}) ? uint64_t(0) : ({lhs}) - ({rhs}))"),
+            shared::Elem::I8 => write!(
+                f,
+                "((({rhs}) > 0 && ({lhs}) < (std::numeric_limits<int8_t>::min() + ({rhs}))) ? std::numeric_limits<int8_t>::min() : ((({rhs}) < 0 && ({lhs}) > (std::numeric_limits<int8_t>::max() + ({rhs}))) ? std::numeric_limits<int8_t>::max() : ({lhs}) - ({rhs})))"
+            ),
+            shared::Elem::I16 => write!(
+                f,
+                "((({rhs}) > 0 && ({lhs}) < (std::numeric_limits<int16_t>::min() + ({rhs}))) ? std::numeric_limits<int16_t>::min() : ((({rhs}) < 0 && ({lhs}) > (std::numeric_limits<int16_t>::max() + ({rhs}))) ? std::numeric_limits<int16_t>::max() : ({lhs}) - ({rhs})))"
+            ),
+            shared::Elem::I32 => write!(
+                f,
+                "((({rhs}) > 0 && ({lhs}) < (std::numeric_limits<int32_t>::min() + ({rhs}))) ? std::numeric_limits<int32_t>::min() : ((({rhs}) < 0 && ({lhs}) > (std::numeric_limits<int32_t>::max() + ({rhs}))) ? std::numeric_limits<int32_t>::max() : ({lhs}) - ({rhs})))"
+            ),
+            shared::Elem::I64 => write!(
+                f,
+                "((({rhs}) > 0 && ({lhs}) < (std::numeric_limits<int64_t>::min() + ({rhs}))) ? std::numeric_limits<int64_t>::min() : ((({rhs}) < 0 && ({lhs}) > (std::numeric_limits<int64_t>::max() + ({rhs}))) ? std::numeric_limits<int64_t>::max() : ({lhs}) - ({rhs})))"
+            ),
+            _ => write!(f, "({lhs}) - ({rhs})"),
+        }
+    }
+
+    fn compile_instruction_popcount_scalar<T: Component<Self>>(
+        f: &mut fmt::Formatter<'_>,
+        input: T,
+        out_elem: Elem<Self>,
+    ) -> fmt::Result {
+        write!(f, "{out_elem}(")?;
+        match input.elem() {
+            shared::Elem::I32 => write!(f, "__builtin_popcount(uint32_t({input}))"),
+            shared::Elem::U32 => write!(f, "__builtin_popcount(uint32_t({input}))"),
+            shared::Elem::I64 => write!(f, "__builtin_popcountll(uint64_t({input}))"),
+            shared::Elem::U64 => write!(f, "__builtin_popcountll(uint64_t({input}))"),
+            _ => write!(f, "__builtin_popcount(uint32_t({input}))"),
+        }?;
+        write!(f, ")")
+    }
+
+    fn compile_instruction_reverse_bits_scalar<T: Component<Self>>(
+        f: &mut fmt::Formatter<'_>,
+        input: T,
+        out_elem: Elem<Self>,
+    ) -> fmt::Result {
+        match out_elem {
+            shared::Elem::I64 | shared::Elem::U64 => write!(
+                f,
+                "([&]() -> {out_elem} {{ uint64_t v = uint64_t({input}); v = ((v >> 1) & 0x5555555555555555ull) | ((v & 0x5555555555555555ull) << 1); v = ((v >> 2) & 0x3333333333333333ull) | ((v & 0x3333333333333333ull) << 2); v = ((v >> 4) & 0x0F0F0F0F0F0F0F0Full) | ((v & 0x0F0F0F0F0F0F0F0Full) << 4); v = ((v >> 8) & 0x00FF00FF00FF00FFull) | ((v & 0x00FF00FF00FF00FFull) << 8); v = ((v >> 16) & 0x0000FFFF0000FFFFull) | ((v & 0x0000FFFF0000FFFFull) << 16); v = (v >> 32) | (v << 32); return {out_elem}(v); }}())"
+            ),
+            _ => {
+                let shift = (size_of::<u32>() - out_elem.size()) * 8;
+                write!(
+                    f,
+                    "([&]() -> {out_elem} {{ uint32_t v = uint32_t({input}); v = ((v >> 1) & 0x55555555u) | ((v & 0x55555555u) << 1); v = ((v >> 2) & 0x33333333u) | ((v & 0x33333333u) << 2); v = ((v >> 4) & 0x0F0F0F0Fu) | ((v & 0x0F0F0F0Fu) << 4); v = ((v >> 8) & 0x00FF00FFu) | ((v & 0x00FF00FFu) << 8); v = (v >> 16) | (v << 16); return {out_elem}(v >> {shift}); }}())"
+                )
+            }
+        }
     }
 
     fn compile_instruction_sync_threads(_f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -288,28 +383,62 @@ impl<Wmma: DialectWmmaCompiler<Self>> DialectInstructions<Self> for TtMetalDiale
     fn compile_instruction_find_first_set<T: Component<Self>>(
         f: &mut fmt::Formatter<'_>,
         input: T,
-        _out_elem: Elem<Self>,
+        out_elem: Elem<Self>,
     ) -> fmt::Result {
-        // GCC RISC-V builtin: find first set bit (1-indexed, returns 0 if none)
-        write!(f, "__builtin_ffs({input})")
+        match input.elem() {
+            shared::Elem::I64 | shared::Elem::U64 => write!(f, "{out_elem}(__builtin_ffsll(uint64_t({input})))"),
+            _ => write!(f, "{out_elem}(__builtin_ffs(uint32_t({input})))"),
+        }
     }
 
     fn compile_instruction_leading_zeros_scalar<T: Component<Self>>(
         f: &mut fmt::Formatter<'_>,
         input: T,
-        _out_elem: Elem<Self>,
+        out_elem: Elem<Self>,
     ) -> fmt::Result {
-        // GCC RISC-V builtin: count leading zeros
-        write!(f, "__builtin_clz({input})")
+        match input.elem() {
+            shared::Elem::I64 | shared::Elem::U64 => write!(
+                f,
+                "(({input}) == 0 ? {out_elem}(64) : {out_elem}(__builtin_clzll(uint64_t({input}))))"
+            ),
+            shared::Elem::I32 | shared::Elem::U32 => write!(
+                f,
+                "(({input}) == 0 ? {out_elem}(32) : {out_elem}(__builtin_clz(uint32_t({input}))))"
+            ),
+            shared::Elem::I16 | shared::Elem::U16 => write!(
+                f,
+                "(({input}) == 0 ? {out_elem}(16) : {out_elem}(__builtin_clz(uint32_t({input})) - 16))"
+            ),
+            _ => write!(
+                f,
+                "(({input}) == 0 ? {out_elem}(8) : {out_elem}(__builtin_clz(uint32_t({input})) - 24))"
+            ),
+        }
     }
 
     fn compile_instruction_trailing_zeros_scalar<T: Component<Self>>(
         f: &mut fmt::Formatter<'_>,
         input: T,
-        _out_elem: Elem<Self>,
+        out_elem: Elem<Self>,
     ) -> fmt::Result {
-        // GCC RISC-V builtin: count trailing zeros
-        write!(f, "__builtin_ctz({input})")
+        match input.elem() {
+            shared::Elem::I64 | shared::Elem::U64 => write!(
+                f,
+                "(({input}) == 0 ? {out_elem}(64) : {out_elem}(__builtin_ctzll(uint64_t({input}))))"
+            ),
+            shared::Elem::I32 | shared::Elem::U32 => write!(
+                f,
+                "(({input}) == 0 ? {out_elem}(32) : {out_elem}(__builtin_ctz(uint32_t({input}))))"
+            ),
+            shared::Elem::I16 | shared::Elem::U16 => write!(
+                f,
+                "(({input}) == 0 ? {out_elem}(16) : {out_elem}(__builtin_ctz(uint32_t({input}))))"
+            ),
+            _ => write!(
+                f,
+                "(({input}) == 0 ? {out_elem}(8) : {out_elem}(__builtin_ctz(uint32_t({input}))))"
+            ),
+        }
     }
 
     fn compile_instruction_max_function_name(
@@ -356,18 +485,12 @@ impl<Wmma: DialectWmmaCompiler<Self>> DialectInstructions<Self> for TtMetalDiale
         write!(f, "{var}")
     }
 
-    fn compile_warp_all<T: Component<Self>>(
-        f: &mut fmt::Formatter<'_>,
-        input: &T,
-    ) -> fmt::Result {
+    fn compile_warp_all<T: Component<Self>>(f: &mut fmt::Formatter<'_>, input: &T) -> fmt::Result {
         // TT-Metal runs single-thread per core — all/any returns own value
         write!(f, "{input}")
     }
 
-    fn compile_warp_any<T: Component<Self>>(
-        f: &mut fmt::Formatter<'_>,
-        input: &T,
-    ) -> fmt::Result {
+    fn compile_warp_any<T: Component<Self>>(f: &mut fmt::Formatter<'_>, input: &T) -> fmt::Result {
         write!(f, "{input}")
     }
 

@@ -1,924 +1,149 @@
 - program_created:
     id: 0
-    timestamp_ns: 1778959930006672323
+    timestamp_ns: 1779243196860150845
 - program_compile_started:
     id: 0
-    timestamp_ns: 1778959930007253183
+    timestamp_ns: 1779243196860665319
 - program_kernel_compile_finished:
     id: 0
-    timestamp_ns: 1778959930010364673
-    duration_ns: 3111490
+    timestamp_ns: 1779243196863480509
+    duration_ns: 2815190
     watcher_kernel_id: 3
     name: cq_dispatch_subordinate
     path: /home/carl/.cache/tt-metal-cache/7480443082328483327/kernels/cq_dispatch_subordinate/7227152901424362888/
     source: tt_metal/impl/dispatch/kernels/cq_dispatch_subordinate.cpp
 - program_kernel_compile_finished:
     id: 0
-    timestamp_ns: 1778959930010993284
-    duration_ns: 3740101
+    timestamp_ns: 1779243196864191545
+    duration_ns: 3526226
     watcher_kernel_id: 1
     name: cq_prefetch
     path: /home/carl/.cache/tt-metal-cache/7480443082328483327/kernels/cq_prefetch/11681118040740904905/
     source: tt_metal/impl/dispatch/kernels/cq_prefetch.cpp
 - program_kernel_compile_finished:
     id: 0
-    timestamp_ns: 1778959930011018562
-    duration_ns: 3765379
+    timestamp_ns: 1779243196864218206
+    duration_ns: 3552887
     watcher_kernel_id: 2
     name: cq_dispatch
     path: /home/carl/.cache/tt-metal-cache/7480443082328483327/kernels/cq_dispatch/304047669242341916/
     source: tt_metal/impl/dispatch/kernels/cq_dispatch.cpp
 - program_compile_finished:
     id: 0
-    timestamp_ns: 1778959930013843851
-    duration_ns: 6590668
+    timestamp_ns: 1779243196866381761
+    duration_ns: 5716442
 - program_created:
     id: 1
-    timestamp_ns: 1778959930114798219
+    timestamp_ns: 1779243196967610890
 - program_created:
     id: 2
-    timestamp_ns: 1778959930114914099
-- program_created:
-    id: 3
-    timestamp_ns: 1778959930114991005
-- program_created:
-    id: 4
-    timestamp_ns: 1778959930115004911
+    timestamp_ns: 1779243196967783747
 - program_destroyed:
-    id: 4
-    timestamp_ns: 1778959930115013988
-- program_compile_started:
-    id: 1
-    timestamp_ns: 1778959930115047702
-- program_created:
-    id: 5
-    timestamp_ns: 1778959930115096765
-- program_destroyed:
-    id: 5
-    timestamp_ns: 1778959930115100152
-- program_created:
-    id: 7
-    timestamp_ns: 1778959930115107736
-- program_created:
-    id: 6
-    timestamp_ns: 1778959930115144876
-- program_created:
-    id: 8
-    timestamp_ns: 1778959930115165916
-- program_destroyed:
-    id: 8
-    timestamp_ns: 1778959930115177618
-- program_compile_started:
-    id: 3
-    timestamp_ns: 1778959930115190192
-- program_compile_started:
     id: 2
-    timestamp_ns: 1778959930115193949
-- program_created:
-    id: 9
-    timestamp_ns: 1778959930115204769
-- program_created:
-    id: 10
-    timestamp_ns: 1778959930115216111
-- program_destroyed:
-    id: 10
-    timestamp_ns: 1778959930115219407
+    timestamp_ns: 1779243196967789268
 - program_compile_started:
-    id: 7
-    timestamp_ns: 1778959930115226721
-- program_created:
-    id: 11
-    timestamp_ns: 1778959930115248983
-- program_destroyed:
-    id: 11
-    timestamp_ns: 1778959930115251868
-- program_compile_started:
-    id: 6
-    timestamp_ns: 1778959930115258621
-- program_created:
-    id: 12
-    timestamp_ns: 1778959930115278720
-- program_destroyed:
-    id: 12
-    timestamp_ns: 1778959930115281154
-- program_compile_started:
-    id: 9
-    timestamp_ns: 1778959930115287456
-- program_created:
-    id: 13
-    timestamp_ns: 1778959930115293117
-- program_created:
-    id: 14
-    timestamp_ns: 1778959930115418324
-- program_destroyed:
-    id: 14
-    timestamp_ns: 1778959930115421079
-- program_compile_started:
-    id: 13
-    timestamp_ns: 1778959930115428152
-- program_kernel_compile_finished:
-    id: 3
-    timestamp_ns: 1778959930116204803
-    duration_ns: 1014611
-    watcher_kernel_id: 9
-    name: Kernel_Source_Code
-    path: /home/carl/.cache/tt-metal-cache/7480443082328483327/kernels/Kernel_Source_Code/5280336292146275134/
-    source: #include <cstdint>
-void kernel_main() {
-    uint32_t dst_addr = get_arg_val<uint32_t>(0);
-    uint32_t num_tiles = get_arg_val<uint32_t>(1);
-
-    constexpr uint32_t cb_out = 0;  // read from CB 0, not 16
-
-    constexpr auto c_args = TensorAccessorArgs<0>();
-    const auto c = TensorAccessor(c_args, dst_addr);
-
-    for (uint32_t i = 0; i < num_tiles; i++) {
-        cb_wait_front(cb_out, 1);
-        uint32_t l1_addr = get_read_ptr(cb_out);
-        noc_async_write_tile(i, c, l1_addr);
-        noc_async_write_barrier();
-        cb_pop_front(cb_out, 1);
-    }
-}
-
+    id: 1
+    timestamp_ns: 1779243196967800880
 - program_kernel_compile_finished:
     id: 1
-    timestamp_ns: 1778959930116278091
-    duration_ns: 1230389
+    timestamp_ns: 1779243197360487516
+    duration_ns: 392686636
     watcher_kernel_id: 4
     name: Kernel_Source_Code
-    path: /home/carl/.cache/tt-metal-cache/7480443082328483327/kernels/Kernel_Source_Code/11173514126846128808/
+    path: /home/carl/.cache/tt-metal-cache/7480443082328483327/kernels/Kernel_Source_Code/6100074758999567338/
     source: #include <cstdint>
 
 void kernel_main() {
-    uint32_t dram_buffer_src_addr = get_arg_val<uint32_t>(0);
-    uint32_t dram_buffer_dst_addr = get_arg_val<uint32_t>(1);
-    uint32_t num_tiles = get_arg_val<uint32_t>(2);
+    uint32_t src0_addr = get_arg_val<uint32_t>(0);
+    uint32_t num_tiles = get_arg_val<uint32_t>(1);
 
-    constexpr uint32_t cb_scratch = tt::CBIndex::c_0;
+    constexpr uint32_t cb_in0 = 0;
 
-    constexpr auto in0_args = TensorAccessorArgs<0>();
-    const auto in0 = TensorAccessor(in0_args, dram_buffer_src_addr);
-
-    constexpr auto out0_args = TensorAccessorArgs<in0_args.next_compile_time_args_offset()>();
-    const auto out0 = TensorAccessor(out0_args, dram_buffer_dst_addr);
+    constexpr auto a0_args = TensorAccessorArgs<0>();
+    const auto a0 = TensorAccessor(a0_args, src0_addr);
 
     for (uint32_t i = 0; i < num_tiles; i++) {
-        cb_reserve_back(cb_scratch, 1);
-        uint32_t l1_addr = get_write_ptr(cb_scratch);
-        noc_async_read_tile(i, in0, l1_addr);
-        noc_async_read_barrier();
-        cb_push_back(cb_scratch, 1);
+        cb_reserve_back(cb_in0, 1);
 
-        cb_wait_front(cb_scratch, 1);
-        l1_addr = get_read_ptr(cb_scratch);
-        noc_async_write_tile(i, out0, l1_addr);
-        noc_async_write_barrier();
-        cb_pop_front(cb_scratch, 1);
+        uint32_t l1_addr_in0 = get_write_ptr(cb_in0);
+        noc_async_read_tile(i, a0, l1_addr_in0);
+        noc_async_read_barrier();
+
+        cb_push_back(cb_in0, 1);
     }
 }
 
 - program_kernel_compile_finished:
-    id: 9
-    timestamp_ns: 1778959930116314460
-    duration_ns: 1027004
-    watcher_kernel_id: 16
-    name: Kernel_Source_Code
-    path: /home/carl/.cache/tt-metal-cache/7480443082328483327/kernels/Kernel_Source_Code/11173514126846128808/
-    source: #include <cstdint>
-
-void kernel_main() {
-    uint32_t dram_buffer_src_addr = get_arg_val<uint32_t>(0);
-    uint32_t dram_buffer_dst_addr = get_arg_val<uint32_t>(1);
-    uint32_t num_tiles = get_arg_val<uint32_t>(2);
-
-    constexpr uint32_t cb_scratch = tt::CBIndex::c_0;
-
-    constexpr auto in0_args = TensorAccessorArgs<0>();
-    const auto in0 = TensorAccessor(in0_args, dram_buffer_src_addr);
-
-    constexpr auto out0_args = TensorAccessorArgs<in0_args.next_compile_time_args_offset()>();
-    const auto out0 = TensorAccessor(out0_args, dram_buffer_dst_addr);
-
-    for (uint32_t i = 0; i < num_tiles; i++) {
-        cb_reserve_back(cb_scratch, 1);
-        uint32_t l1_addr = get_write_ptr(cb_scratch);
-        noc_async_read_tile(i, in0, l1_addr);
-        noc_async_read_barrier();
-        cb_push_back(cb_scratch, 1);
-
-        cb_wait_front(cb_scratch, 1);
-        l1_addr = get_read_ptr(cb_scratch);
-        noc_async_write_tile(i, out0, l1_addr);
-        noc_async_write_barrier();
-        cb_pop_front(cb_scratch, 1);
-    }
-}
-
-- program_kernel_compile_finished:
-    id: 2
-    timestamp_ns: 1778959930116344928
-    duration_ns: 1150979
+    id: 1
+    timestamp_ns: 1779243197367566738
+    duration_ns: 399765858
     watcher_kernel_id: 5
     name: Kernel_Source_Code
-    path: /home/carl/.cache/tt-metal-cache/7480443082328483327/kernels/Kernel_Source_Code/16758054711357524778/
+    path: /home/carl/.cache/tt-metal-cache/7480443082328483327/kernels/Kernel_Source_Code/8096198601231190486/
     source: #include <cstdint>
 
 void kernel_main() {
-    uint32_t src0_addr = get_arg_val<uint32_t>(0);
+    uint32_t dst0_addr = get_arg_val<uint32_t>(0);
     uint32_t num_tiles = get_arg_val<uint32_t>(1);
 
-    constexpr uint32_t cb_in0 = 0;
+    constexpr uint32_t cb_out0 = 16;
 
-    constexpr auto a0_args = TensorAccessorArgs<0>();
-    const auto a0 = TensorAccessor(a0_args, src0_addr);
+    constexpr auto c0_args = TensorAccessorArgs<0>();
+    const auto c0 = TensorAccessor(c0_args, dst0_addr);
 
     for (uint32_t i = 0; i < num_tiles; i++) {
-        cb_reserve_back(cb_in0, 1);
-
-        uint32_t l1_addr_in0 = get_write_ptr(cb_in0);
-        noc_async_read_tile(i, a0, l1_addr_in0);
-        noc_async_read_barrier();
-
-        cb_push_back(cb_in0, 1);
+        cb_wait_front(cb_out0, 1);
+        uint32_t l1_addr_out0 = get_read_ptr(cb_out0);
+        noc_async_write_tile(i, c0, l1_addr_out0);
+        noc_async_write_barrier();
+        cb_pop_front(cb_out0, 1);
     }
 }
 
-- program_created:
-    id: 15
-    timestamp_ns: 1778959930116428276
-- program_created:
-    id: 16
-    timestamp_ns: 1778959930116549936
-- program_destroyed:
-    id: 16
-    timestamp_ns: 1778959930116552210
-- program_compile_started:
-    id: 15
-    timestamp_ns: 1778959930116558422
-- program_created:
-    id: 17
-    timestamp_ns: 1778959930116644986
-- program_compile_finished:
+- program_kernel_compile_finished:
     id: 1
-    timestamp_ns: 1778959930116742029
-    duration_ns: 1694327
-- program_created:
-    id: 18
-    timestamp_ns: 1778959930116757880
-- program_destroyed:
-    id: 18
-    timestamp_ns: 1778959930116766567
-- program_compile_started:
-    id: 17
-    timestamp_ns: 1778959930116774521
-- program_kernel_compile_finished:
-    id: 6
-    timestamp_ns: 1778959930116797224
-    duration_ns: 1538603
-    watcher_kernel_id: 13
-    name: Kernel_Source_Code
-    path: /home/carl/.cache/tt-metal-cache/7480443082328483327/kernels/Kernel_Source_Code/16758054711357524778/
-    source: #include <cstdint>
-
-void kernel_main() {
-    uint32_t src0_addr = get_arg_val<uint32_t>(0);
-    uint32_t num_tiles = get_arg_val<uint32_t>(1);
-
-    constexpr uint32_t cb_in0 = 0;
-
-    constexpr auto a0_args = TensorAccessorArgs<0>();
-    const auto a0 = TensorAccessor(a0_args, src0_addr);
-
-    for (uint32_t i = 0; i < num_tiles; i++) {
-        cb_reserve_back(cb_in0, 1);
-
-        uint32_t l1_addr_in0 = get_write_ptr(cb_in0);
-        noc_async_read_tile(i, a0, l1_addr_in0);
-        noc_async_read_barrier();
-
-        cb_push_back(cb_in0, 1);
-    }
-}
-
-- program_kernel_compile_finished:
-    id: 17
-    timestamp_ns: 1778959930116833954
-    duration_ns: 59433
-    watcher_kernel_id: 24
-    name: Kernel_Source_Code
-    path: /home/carl/.cache/tt-metal-cache/7480443082328483327/kernels/Kernel_Source_Code/7925606904958390550/
-    source: #include <cstdint>
-
-void kernel_main() {
-    uint32_t dst0_addr = get_arg_val<uint32_t>(0);
-    uint32_t num_tiles = get_arg_val<uint32_t>(1);
-
-    constexpr uint32_t cb_out0 = 16;
-
-    constexpr auto c0_args = TensorAccessorArgs<0>();
-    const auto c0 = TensorAccessor(c0_args, dst0_addr);
-
-    for (uint32_t i = 0; i < num_tiles; i++) {
-        cb_wait_front(cb_out0, 1);
-        uint32_t l1_addr_out0 = get_read_ptr(cb_out0);
-        noc_async_write_tile(i, c0, l1_addr_out0);
-        noc_async_write_barrier();
-        cb_pop_front(cb_out0, 1);
-    }
-}
-
-- program_kernel_compile_finished:
-    id: 7
-    timestamp_ns: 1778959930116853090
-    duration_ns: 1626369
-    watcher_kernel_id: 10
-    name: Kernel_Source_Code
-    path: /home/carl/.cache/tt-metal-cache/7480443082328483327/kernels/Kernel_Source_Code/16758054711357524778/
-    source: #include <cstdint>
-
-void kernel_main() {
-    uint32_t src0_addr = get_arg_val<uint32_t>(0);
-    uint32_t num_tiles = get_arg_val<uint32_t>(1);
-
-    constexpr uint32_t cb_in0 = 0;
-
-    constexpr auto a0_args = TensorAccessorArgs<0>();
-    const auto a0 = TensorAccessor(a0_args, src0_addr);
-
-    for (uint32_t i = 0; i < num_tiles; i++) {
-        cb_reserve_back(cb_in0, 1);
-
-        uint32_t l1_addr_in0 = get_write_ptr(cb_in0);
-        noc_async_read_tile(i, a0, l1_addr_in0);
-        noc_async_read_barrier();
-
-        cb_push_back(cb_in0, 1);
-    }
-}
-
-- program_kernel_compile_finished:
-    id: 6
-    timestamp_ns: 1778959930116861597
-    duration_ns: 1602976
-    watcher_kernel_id: 14
-    name: Kernel_Source_Code
-    path: /home/carl/.cache/tt-metal-cache/7480443082328483327/kernels/Kernel_Source_Code/7925606904958390550/
-    source: #include <cstdint>
-
-void kernel_main() {
-    uint32_t dst0_addr = get_arg_val<uint32_t>(0);
-    uint32_t num_tiles = get_arg_val<uint32_t>(1);
-
-    constexpr uint32_t cb_out0 = 16;
-
-    constexpr auto c0_args = TensorAccessorArgs<0>();
-    const auto c0 = TensorAccessor(c0_args, dst0_addr);
-
-    for (uint32_t i = 0; i < num_tiles; i++) {
-        cb_wait_front(cb_out0, 1);
-        uint32_t l1_addr_out0 = get_read_ptr(cb_out0);
-        noc_async_write_tile(i, c0, l1_addr_out0);
-        noc_async_write_barrier();
-        cb_pop_front(cb_out0, 1);
-    }
-}
-
-- program_kernel_compile_finished:
-    id: 17
-    timestamp_ns: 1778959930116872668
-    duration_ns: 98147
-    watcher_kernel_id: 23
-    name: Kernel_Source_Code
-    path: /home/carl/.cache/tt-metal-cache/7480443082328483327/kernels/Kernel_Source_Code/16758054711357524778/
-    source: #include <cstdint>
-
-void kernel_main() {
-    uint32_t src0_addr = get_arg_val<uint32_t>(0);
-    uint32_t num_tiles = get_arg_val<uint32_t>(1);
-
-    constexpr uint32_t cb_in0 = 0;
-
-    constexpr auto a0_args = TensorAccessorArgs<0>();
-    const auto a0 = TensorAccessor(a0_args, src0_addr);
-
-    for (uint32_t i = 0; i < num_tiles; i++) {
-        cb_reserve_back(cb_in0, 1);
-
-        uint32_t l1_addr_in0 = get_write_ptr(cb_in0);
-        noc_async_read_tile(i, a0, l1_addr_in0);
-        noc_async_read_barrier();
-
-        cb_push_back(cb_in0, 1);
-    }
-}
-
-- program_kernel_compile_finished:
-    id: 2
-    timestamp_ns: 1778959930116909346
-    duration_ns: 1715397
+    timestamp_ns: 1779243197701778777
+    duration_ns: 733977897
     watcher_kernel_id: 6
     name: Kernel_Source_Code
-    path: /home/carl/.cache/tt-metal-cache/7480443082328483327/kernels/Kernel_Source_Code/7925606904958390550/
-    source: #include <cstdint>
+    path: /home/carl/.cache/tt-metal-cache/7480443082328483327/kernels/Kernel_Source_Code/11342705283464973137/
+    source: #include "api/compute/common.h"
+#include "api/compute/tile_move_copy.h"
+#include "api/compute/eltwise_unary/eltwise_unary.h"
+#include "api/compute/eltwise_unary/sqrt.h"
+#include "api/compute/compute_kernel_api.h"
 
 void kernel_main() {
-    uint32_t dst0_addr = get_arg_val<uint32_t>(0);
-    uint32_t num_tiles = get_arg_val<uint32_t>(1);
+    uint32_t num_tiles = get_arg_val<uint32_t>(0);
 
-    constexpr uint32_t cb_out0 = 16;
+    constexpr auto cb_in0 = tt::CBIndex::c_0;
+    constexpr auto cb_out0 = tt::CBIndex::c_16;
+    constexpr uint32_t dst_reg = 0;
 
-    constexpr auto c0_args = TensorAccessorArgs<0>();
-    const auto c0 = TensorAccessor(c0_args, dst0_addr);
+    init_sfpu(cb_in0, cb_out0);
+    copy_tile_init(cb_in0);
+    sqrt_tile_init();
 
     for (uint32_t i = 0; i < num_tiles; i++) {
-        cb_wait_front(cb_out0, 1);
-        uint32_t l1_addr_out0 = get_read_ptr(cb_out0);
-        noc_async_write_tile(i, c0, l1_addr_out0);
-        noc_async_write_barrier();
-        cb_pop_front(cb_out0, 1);
+        cb_wait_front(cb_in0, 1);
+        tile_regs_acquire();
+        copy_tile(cb_in0, 0, dst_reg);
+        sqrt_tile(dst_reg);
+        tile_regs_commit();
+        tile_regs_wait();
+
+        cb_reserve_back(cb_out0, 1);
+        pack_tile(dst_reg, cb_out0);
+        cb_pop_front(cb_in0, 1);
+        tile_regs_release();
+        cb_push_back(cb_out0, 1);
     }
 }
 
 - program_compile_finished:
-    id: 9
-    timestamp_ns: 1778959930117051907
-    duration_ns: 1764451
-- program_kernel_compile_finished:
-    id: 7
-    timestamp_ns: 1778959930117117661
-    duration_ns: 1890940
-    watcher_kernel_id: 11
-    name: Kernel_Source_Code
-    path: /home/carl/.cache/tt-metal-cache/7480443082328483327/kernels/Kernel_Source_Code/7925606904958390550/
-    source: #include <cstdint>
-
-void kernel_main() {
-    uint32_t dst0_addr = get_arg_val<uint32_t>(0);
-    uint32_t num_tiles = get_arg_val<uint32_t>(1);
-
-    constexpr uint32_t cb_out0 = 16;
-
-    constexpr auto c0_args = TensorAccessorArgs<0>();
-    const auto c0 = TensorAccessor(c0_args, dst0_addr);
-
-    for (uint32_t i = 0; i < num_tiles; i++) {
-        cb_wait_front(cb_out0, 1);
-        uint32_t l1_addr_out0 = get_read_ptr(cb_out0);
-        noc_async_write_tile(i, c0, l1_addr_out0);
-        noc_async_write_barrier();
-        cb_pop_front(cb_out0, 1);
-    }
-}
-
-- program_kernel_compile_finished:
-    id: 3
-    timestamp_ns: 1778959930117152628
-    duration_ns: 1962436
-    watcher_kernel_id: 8
-    name: Kernel_Source_Code
-    path: /home/carl/.cache/tt-metal-cache/7480443082328483327/kernels/Kernel_Source_Code/17472717039781710656/
-    source: #include <cstdint>
-
-void kernel_main() {
-    uint32_t src0_addr = get_arg_val<uint32_t>(0);
-    uint32_t num_tiles = get_arg_val<uint32_t>(1);
-
-    constexpr uint32_t cb_in0 = 0;
-
-    constexpr auto a0_args = TensorAccessorArgs<0>();
-    const auto a0 = TensorAccessor(a0_args, src0_addr);
-
-    for (uint32_t i = 0; i < num_tiles; i++) {
-        cb_reserve_back(cb_in0, 1);
-
-        uint32_t l1_addr_in0 = get_write_ptr(cb_in0);
-        noc_async_read_tile(i, a0, l1_addr_in0);
-        noc_async_read_barrier();
-
-        cb_push_back(cb_in0, 1);
-    }
-}
-
+    id: 1
+    timestamp_ns: 1779243197702468051
+    duration_ns: 734667171
 - program_destroyed:
     id: 1
-    timestamp_ns: 1778959930117255882
-- program_kernel_compile_finished:
-    id: 15
-    timestamp_ns: 1778959930117503201
-    duration_ns: 944779
-    watcher_kernel_id: 21
-    name: Kernel_Source_Code
-    path: /home/carl/.cache/tt-metal-cache/7480443082328483327/kernels/Kernel_Source_Code/10396473865698995248/
-    source: #include <cstdint>
-
-void kernel_main() {
-    uint32_t dst0_addr = get_arg_val<uint32_t>(0);
-    uint32_t num_tiles = get_arg_val<uint32_t>(1);
-
-    constexpr uint32_t cb_out0 = 16;
-
-    constexpr auto c0_args = TensorAccessorArgs<0>();
-    const auto c0 = TensorAccessor(c0_args, dst0_addr);
-
-    for (uint32_t i = 0; i < num_tiles; i++) {
-        cb_wait_front(cb_out0, 1);
-        uint32_t l1_addr_out0 = get_read_ptr(cb_out0);
-        noc_async_write_tile(i, c0, l1_addr_out0);
-        noc_async_write_barrier();
-        cb_pop_front(cb_out0, 1);
-    }
-}
-
-- program_compile_finished:
-    id: 3
-    timestamp_ns: 1778959930117784644
-    duration_ns: 2594452
-- program_destroyed:
-    id: 9
-    timestamp_ns: 1778959930118059745
-- program_destroyed:
-    id: 3
-    timestamp_ns: 1778959930118183940
-- program_kernel_compile_finished:
-    id: 15
-    timestamp_ns: 1778959930118434174
-    duration_ns: 1875752
-    watcher_kernel_id: 20
-    name: Kernel_Source_Code
-    path: /home/carl/.cache/tt-metal-cache/7480443082328483327/kernels/Kernel_Source_Code/10866536331891514066/
-    source: #include <cstdint>
-
-void kernel_main() {
-    uint32_t src0_addr = get_arg_val<uint32_t>(0);
-    uint32_t src1_addr = get_arg_val<uint32_t>(1);
-    uint32_t num_tiles = get_arg_val<uint32_t>(2);
-
-    constexpr uint32_t cb_in0 = 0;
-    constexpr uint32_t cb_in1 = 1;
-
-    constexpr auto a0_args = TensorAccessorArgs<0>();
-    const auto a0 = TensorAccessor(a0_args, src0_addr);
-    constexpr auto a1_args = TensorAccessorArgs<a0_args.next_compile_time_args_offset()>();
-    const auto a1 = TensorAccessor(a1_args, src1_addr);
-
-    for (uint32_t i = 0; i < num_tiles; i++) {
-        cb_reserve_back(cb_in0, 1);
-        cb_reserve_back(cb_in1, 1);
-
-        uint32_t l1_addr_in0 = get_write_ptr(cb_in0);
-        noc_async_read_tile(i, a0, l1_addr_in0);
-        uint32_t l1_addr_in1 = get_write_ptr(cb_in1);
-        noc_async_read_tile(i, a1, l1_addr_in1);
-        noc_async_read_barrier();
-
-        cb_push_back(cb_in0, 1);
-        cb_push_back(cb_in1, 1);
-    }
-}
-
-- program_kernel_compile_finished:
-    id: 15
-    timestamp_ns: 1778959930120088185
-    duration_ns: 3529763
-    watcher_kernel_id: 22
-    name: Kernel_Source_Code
-    path: /home/carl/.cache/tt-metal-cache/7480443082328483327/kernels/Kernel_Source_Code/12817368453405970302/
-    source: #include "api/compute/common.h"
-#include "api/compute/eltwise_binary.h"
-#include "api/compute/compute_kernel_api.h"
-
-void kernel_main() {
-    uint32_t num_tiles = get_arg_val<uint32_t>(0);
-
-    constexpr auto cb_in0 = tt::CBIndex::c_0;
-    constexpr auto cb_in1 = tt::CBIndex::c_1;
-    constexpr auto cb_out0 = tt::CBIndex::c_16;
-    constexpr uint32_t dst_reg = 0;
-
-    binary_op_init_common(cb_in0, cb_in1, cb_out0);
-    add_tiles_init(cb_in0, cb_in1);
-
-    for (uint32_t i = 0; i < num_tiles; i++) {
-        tile_regs_acquire();
-        cb_wait_front(cb_in0, 1);
-        cb_wait_front(cb_in1, 1);
-        add_tiles(cb_in0, cb_in1, 0, 0, dst_reg);
-        tile_regs_commit();
-        tile_regs_wait();
-
-        cb_pop_front(cb_in0, 1);
-        cb_pop_front(cb_in1, 1);
-
-        cb_reserve_back(cb_out0, 1);
-        pack_tile(dst_reg, cb_out0);
-        cb_push_back(cb_out0, 1);
-
-        tile_regs_release();
-    }
-}
-
-- program_kernel_compile_finished:
-    id: 7
-    timestamp_ns: 1778959930120116118
-    duration_ns: 4889397
-    watcher_kernel_id: 12
-    name: Kernel_Source_Code
-    path: /home/carl/.cache/tt-metal-cache/7480443082328483327/kernels/Kernel_Source_Code/4906068635902304848/
-    source: #include "api/compute/common.h"
-#include "api/compute/eltwise_binary.h"
-#include "api/compute/tile_move_copy.h"
-#include "api/compute/compute_kernel_api.h"
-
-void kernel_main() {
-    uint32_t num_tiles = get_arg_val<uint32_t>(0);
-
-    constexpr auto cb_in0 = tt::CBIndex::c_0;
-    constexpr auto cb_out0 = tt::CBIndex::c_16;
-    constexpr uint32_t dst_reg = 0;
-
-    // Initialize the compute engine for copy operations on these CBs.
-    // binary_op_init_common sets up the Unpack/Math/Pack cores.
-    binary_op_init_common(cb_in0, cb_in0, cb_out0);
-    copy_tile_init(cb_in0);
-
-    for (uint32_t i = 0; i < num_tiles; i++) {
-        tile_regs_acquire();
-        cb_wait_front(cb_in0, 1);
-        copy_tile(cb_in0, 0, dst_reg);
-        tile_regs_commit();
-        tile_regs_wait();
-
-        cb_pop_front(cb_in0, 1);
-
-        cb_reserve_back(cb_out0, 1);
-        pack_tile(dst_reg, cb_out0);
-        cb_push_back(cb_out0, 1);
-
-        tile_regs_release();
-    }
-}
-
-- program_kernel_compile_finished:
-    id: 13
-    timestamp_ns: 1778959930120147087
-    duration_ns: 4718935
-    watcher_kernel_id: 19
-    name: Kernel_Source_Code
-    path: /home/carl/.cache/tt-metal-cache/7480443082328483327/kernels/Kernel_Source_Code/4906068635902304848/
-    source: #include "api/compute/common.h"
-#include "api/compute/eltwise_binary.h"
-#include "api/compute/tile_move_copy.h"
-#include "api/compute/compute_kernel_api.h"
-
-void kernel_main() {
-    uint32_t num_tiles = get_arg_val<uint32_t>(0);
-
-    constexpr auto cb_in0 = tt::CBIndex::c_0;
-    constexpr auto cb_out0 = tt::CBIndex::c_16;
-    constexpr uint32_t dst_reg = 0;
-
-    // Initialize the compute engine for copy operations on these CBs.
-    // binary_op_init_common sets up the Unpack/Math/Pack cores.
-    binary_op_init_common(cb_in0, cb_in0, cb_out0);
-    copy_tile_init(cb_in0);
-
-    for (uint32_t i = 0; i < num_tiles; i++) {
-        tile_regs_acquire();
-        cb_wait_front(cb_in0, 1);
-        copy_tile(cb_in0, 0, dst_reg);
-        tile_regs_commit();
-        tile_regs_wait();
-
-        cb_pop_front(cb_in0, 1);
-
-        cb_reserve_back(cb_out0, 1);
-        pack_tile(dst_reg, cb_out0);
-        cb_push_back(cb_out0, 1);
-
-        tile_regs_release();
-    }
-}
-
-- program_kernel_compile_finished:
-    id: 2
-    timestamp_ns: 1778959930120190479
-    duration_ns: 4996530
-    watcher_kernel_id: 7
-    name: Kernel_Source_Code
-    path: /home/carl/.cache/tt-metal-cache/7480443082328483327/kernels/Kernel_Source_Code/4906068635902304848/
-    source: #include "api/compute/common.h"
-#include "api/compute/eltwise_binary.h"
-#include "api/compute/tile_move_copy.h"
-#include "api/compute/compute_kernel_api.h"
-
-void kernel_main() {
-    uint32_t num_tiles = get_arg_val<uint32_t>(0);
-
-    constexpr auto cb_in0 = tt::CBIndex::c_0;
-    constexpr auto cb_out0 = tt::CBIndex::c_16;
-    constexpr uint32_t dst_reg = 0;
-
-    // Initialize the compute engine for copy operations on these CBs.
-    // binary_op_init_common sets up the Unpack/Math/Pack cores.
-    binary_op_init_common(cb_in0, cb_in0, cb_out0);
-    copy_tile_init(cb_in0);
-
-    for (uint32_t i = 0; i < num_tiles; i++) {
-        tile_regs_acquire();
-        cb_wait_front(cb_in0, 1);
-        copy_tile(cb_in0, 0, dst_reg);
-        tile_regs_commit();
-        tile_regs_wait();
-
-        cb_pop_front(cb_in0, 1);
-
-        cb_reserve_back(cb_out0, 1);
-        pack_tile(dst_reg, cb_out0);
-        cb_push_back(cb_out0, 1);
-
-        tile_regs_release();
-    }
-}
-
-- program_kernel_compile_finished:
-    id: 17
-    timestamp_ns: 1778959930120223612
-    duration_ns: 3449091
-    watcher_kernel_id: 25
-    name: Kernel_Source_Code
-    path: /home/carl/.cache/tt-metal-cache/7480443082328483327/kernels/Kernel_Source_Code/4906068635902304848/
-    source: #include "api/compute/common.h"
-#include "api/compute/eltwise_binary.h"
-#include "api/compute/tile_move_copy.h"
-#include "api/compute/compute_kernel_api.h"
-
-void kernel_main() {
-    uint32_t num_tiles = get_arg_val<uint32_t>(0);
-
-    constexpr auto cb_in0 = tt::CBIndex::c_0;
-    constexpr auto cb_out0 = tt::CBIndex::c_16;
-    constexpr uint32_t dst_reg = 0;
-
-    // Initialize the compute engine for copy operations on these CBs.
-    // binary_op_init_common sets up the Unpack/Math/Pack cores.
-    binary_op_init_common(cb_in0, cb_in0, cb_out0);
-    copy_tile_init(cb_in0);
-
-    for (uint32_t i = 0; i < num_tiles; i++) {
-        tile_regs_acquire();
-        cb_wait_front(cb_in0, 1);
-        copy_tile(cb_in0, 0, dst_reg);
-        tile_regs_commit();
-        tile_regs_wait();
-
-        cb_pop_front(cb_in0, 1);
-
-        cb_reserve_back(cb_out0, 1);
-        pack_tile(dst_reg, cb_out0);
-        cb_push_back(cb_out0, 1);
-
-        tile_regs_release();
-    }
-}
-
-- program_kernel_compile_finished:
-    id: 6
-    timestamp_ns: 1778959930120254881
-    duration_ns: 4996260
-    watcher_kernel_id: 15
-    name: Kernel_Source_Code
-    path: /home/carl/.cache/tt-metal-cache/7480443082328483327/kernels/Kernel_Source_Code/4906068635902304848/
-    source: #include "api/compute/common.h"
-#include "api/compute/eltwise_binary.h"
-#include "api/compute/tile_move_copy.h"
-#include "api/compute/compute_kernel_api.h"
-
-void kernel_main() {
-    uint32_t num_tiles = get_arg_val<uint32_t>(0);
-
-    constexpr auto cb_in0 = tt::CBIndex::c_0;
-    constexpr auto cb_out0 = tt::CBIndex::c_16;
-    constexpr uint32_t dst_reg = 0;
-
-    // Initialize the compute engine for copy operations on these CBs.
-    // binary_op_init_common sets up the Unpack/Math/Pack cores.
-    binary_op_init_common(cb_in0, cb_in0, cb_out0);
-    copy_tile_init(cb_in0);
-
-    for (uint32_t i = 0; i < num_tiles; i++) {
-        tile_regs_acquire();
-        cb_wait_front(cb_in0, 1);
-        copy_tile(cb_in0, 0, dst_reg);
-        tile_regs_commit();
-        tile_regs_wait();
-
-        cb_pop_front(cb_in0, 1);
-
-        cb_reserve_back(cb_out0, 1);
-        pack_tile(dst_reg, cb_out0);
-        cb_push_back(cb_out0, 1);
-
-        tile_regs_release();
-    }
-}
-
-- program_kernel_compile_finished:
-    id: 13
-    timestamp_ns: 1778959930120365120
-    duration_ns: 4936968
-    watcher_kernel_id: 18
-    name: Kernel_Source_Code
-    path: /home/carl/.cache/tt-metal-cache/7480443082328483327/kernels/Kernel_Source_Code/7925606904958390550/
-    source: #include <cstdint>
-
-void kernel_main() {
-    uint32_t dst0_addr = get_arg_val<uint32_t>(0);
-    uint32_t num_tiles = get_arg_val<uint32_t>(1);
-
-    constexpr uint32_t cb_out0 = 16;
-
-    constexpr auto c0_args = TensorAccessorArgs<0>();
-    const auto c0 = TensorAccessor(c0_args, dst0_addr);
-
-    for (uint32_t i = 0; i < num_tiles; i++) {
-        cb_wait_front(cb_out0, 1);
-        uint32_t l1_addr_out0 = get_read_ptr(cb_out0);
-        noc_async_write_tile(i, c0, l1_addr_out0);
-        noc_async_write_barrier();
-        cb_pop_front(cb_out0, 1);
-    }
-}
-
-- program_kernel_compile_finished:
-    id: 13
-    timestamp_ns: 1778959930120399756
-    duration_ns: 4971604
-    watcher_kernel_id: 17
-    name: Kernel_Source_Code
-    path: /home/carl/.cache/tt-metal-cache/7480443082328483327/kernels/Kernel_Source_Code/16758054711357524778/
-    source: #include <cstdint>
-
-void kernel_main() {
-    uint32_t src0_addr = get_arg_val<uint32_t>(0);
-    uint32_t num_tiles = get_arg_val<uint32_t>(1);
-
-    constexpr uint32_t cb_in0 = 0;
-
-    constexpr auto a0_args = TensorAccessorArgs<0>();
-    const auto a0 = TensorAccessor(a0_args, src0_addr);
-
-    for (uint32_t i = 0; i < num_tiles; i++) {
-        cb_reserve_back(cb_in0, 1);
-
-        uint32_t l1_addr_in0 = get_write_ptr(cb_in0);
-        noc_async_read_tile(i, a0, l1_addr_in0);
-        noc_async_read_barrier();
-
-        cb_push_back(cb_in0, 1);
-    }
-}
-
-- program_compile_finished:
-    id: 15
-    timestamp_ns: 1778959930121409637
-    duration_ns: 4851215
-- program_compile_finished:
-    id: 7
-    timestamp_ns: 1778959930121576533
-    duration_ns: 6349812
-- program_compile_finished:
-    id: 6
-    timestamp_ns: 1778959930121589739
-    duration_ns: 6331118
-- program_compile_finished:
-    id: 13
-    timestamp_ns: 1778959930121620817
-    duration_ns: 6192665
-- program_compile_finished:
-    id: 2
-    timestamp_ns: 1778959930121640344
-    duration_ns: 6446395
-- program_compile_finished:
-    id: 17
-    timestamp_ns: 1778959930121656254
-    duration_ns: 4881733
-- program_destroyed:
-    id: 15
-    timestamp_ns: 1778959930121790128
-- program_destroyed:
-    id: 7
-    timestamp_ns: 1778959930121940382
-- program_destroyed:
-    id: 13
-    timestamp_ns: 1778959930121996959
-- program_destroyed:
-    id: 2
-    timestamp_ns: 1778959930122109332
-- program_destroyed:
-    id: 17
-    timestamp_ns: 1778959930122460407
-- program_destroyed:
-    id: 6
-    timestamp_ns: 1778959930122646609
+    timestamp_ns: 1779243197702844363

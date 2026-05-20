@@ -300,6 +300,7 @@ impl<D: Dialect> CppCompiler<D> {
             const_arrays: self.const_arrays,
             local_arrays: self.local_arrays,
             info_by_ptr: !self.compilation_options.supports_features.grid_constants,
+            info_static_len: self.info.metadata.static_len() as usize,
             has_dynamic_meta: self.info.has_dynamic_meta,
             address_type: self.addr_type,
         };

@@ -8,11 +8,13 @@ use cubecl_cpp::shared::CompilationOptions;
 use cubecl_cpp::tt_metal::TtKernelSources;
 use cubecl_runtime::compiler::CubeTask;
 use cubecl_runtime::id::KernelId;
+use cubecl_runtime::kernel::Visibility;
 use cubecl_runtime::timestamp_profiler::TimestampProfiler;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use crate::compute::storage::gpu::TtResource;
 use crate::runtime::TtCompiler;
 use cubecl_runtime::logging::ServerLogger;
 use libtt_metal_cxx::{
@@ -37,6 +39,26 @@ pub struct TtCompiledKernel {
     pub writer_kernel_id: u32,
     pub cb_in_id: usize,
     pub cb_out_id: usize,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub(crate) struct RuntimeBinding {
+    pub visibility: Visibility,
+    pub address: u32,
+    pub logical_size_bytes: u64,
+    pub allocation_size_bytes: u64,
+    pub compile_args: Vec<u32>,
+    pub item_size_bytes: u32,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub(crate) struct PreparedLaunch {
+    pub sources: TtKernelSources,
+    pub input_addrs: Vec<u32>,
+    pub output_addrs: Vec<u32>,
+    pub bindings: Vec<RuntimeBinding>,
 }
 
 impl core::fmt::Debug for TtCompiledKernel {
@@ -88,22 +110,42 @@ impl TtContext {
         sources: &TtKernelSources,
         input_addrs: &[u32],
         output_addrs: &[u32],
-        reader_compile_args: &[u32],
-        writer_compile_args: &[u32],
         _logger: Arc<ServerLogger>,
     ) -> Result<TtCompiledKernel, LaunchError> {
+        let _ = println!(
+            "[compile_kernel] enter
+"
+        );
         let core = LogicalCore::new(0, 0);
         let core_range = CoreRangeSet::from_core(core);
 
+        if sources.num_inputs > 0 && sources.reader_compile_args.is_empty() {
+            return Err(kernel_build_error(
+                "reader compile args missing for TT-Metal input buffers",
+            ));
+        }
+        if sources.num_outputs > 0 && sources.writer_compile_args.is_empty() {
+            return Err(kernel_build_error(
+                "writer compile args missing for TT-Metal output buffers",
+            ));
+        }
+
+        let _ = println!(
+            "[compile_kernel] Program::new
+"
+        );
         let mut program = Program::new();
 
         let cb_tiles = 2u32;
         let cb_size = cb_tiles * sources.tile_size_bytes;
-        let cb_format = data_format_to_tt(sources.data_format_tt);
+        let cb_format = data_format_to_tt(sources.data_format_tt)?;
 
-        // Input CBs at indices 0, 1, 2, ...
         let mut cb_in_ids = Vec::new();
         for i in 0..sources.num_inputs {
+            let _ = println!(
+                "[compile_kernel] create_circular_buffer in
+"
+            );
             let mut cb_config = CircularBufferConfig::new(cb_size);
             cb_config
                 .index(i as u8)
@@ -115,9 +157,12 @@ impl TtContext {
             cb_in_ids.push(id);
         }
 
-        // Output CBs at indices 16, 17, 18, ...
         let mut cb_out_ids = Vec::new();
         for i in 0..sources.num_outputs {
+            let _ = println!(
+                "[compile_kernel] create_circular_buffer out
+"
+            );
             let mut cb_config = CircularBufferConfig::new(cb_size);
             cb_config
                 .index(16u8 + i as u8)
@@ -129,13 +174,16 @@ impl TtContext {
             cb_out_ids.push(id);
         }
 
-        // Reader kernel
+        let _ = println!(
+            "[compile_kernel] create_data_movement reader
+"
+        );
         let mut reader_config =
             DataMovementKernelConfig::reader().map_err(map_launch_err("reader config"))?;
         reader_config
             .set_processor(DataMovementProcessor::Riscv1)
             .set_opt_level(KernelBuildOptLevel::O3);
-        for &arg in reader_compile_args {
+        for &arg in &sources.reader_compile_args {
             reader_config.add_compile_arg(arg);
         }
         let reader_id = program
@@ -144,15 +192,18 @@ impl TtContext {
                 core,
                 &reader_config,
             )
-            .map_err(map_launch_err("reader kernel"))?;
+            .map_err(map_kernel_build_err("reader kernel"))?;
 
-        // Writer kernel
+        let _ = println!(
+            "[compile_kernel] create_data_movement writer
+"
+        );
         let mut writer_config =
             DataMovementKernelConfig::writer().map_err(map_launch_err("writer config"))?;
         writer_config
             .set_processor(DataMovementProcessor::Riscv0)
             .set_opt_level(KernelBuildOptLevel::O3);
-        for &arg in writer_compile_args {
+        for &arg in &sources.writer_compile_args {
             writer_config.add_compile_arg(arg);
         }
         let writer_id = program
@@ -161,9 +212,12 @@ impl TtContext {
                 core,
                 &writer_config,
             )
-            .map_err(map_launch_err("writer kernel"))?;
+            .map_err(map_kernel_build_err("writer kernel"))?;
 
-        // Compute kernel
+        let _ = println!(
+            "[compile_kernel] create_compute_kernel
+"
+        );
         let mut compute_config = ComputeKernelConfig::new();
         compute_config
             .set_math_fidelity(MathFidelity::HiFi4)
@@ -174,25 +228,33 @@ impl TtContext {
                 core,
                 &compute_config,
             )
-            .map_err(map_launch_err("compute kernel"))?;
+            .map_err(map_kernel_build_err("compute kernel"))?;
 
-        // Runtime args: reader gets [addr_0, ..., num_tiles, tile_size]
+        let _ = println!(
+            "[compile_kernel] set_runtime_args
+"
+        );
         let mut reader_args: Vec<u32> = input_addrs.to_vec();
         reader_args.push(sources.num_tiles);
-        reader_args.push(sources.tile_size_bytes);
         program
             .set_runtime_args(reader_id, core, &reader_args)
             .map_err(map_launch_err("reader runtime args"))?;
 
-        let mut writer_args: Vec<u32> = output_addrs.to_vec();
+        let mut writer_args = Vec::with_capacity(
+            output_addrs.len() + 1 + sources.writer_runtime_args.len(),
+        );
+        writer_args.extend(output_addrs.iter().copied());
         writer_args.push(sources.num_tiles);
-        writer_args.push(sources.tile_size_bytes);
+        writer_args.extend(sources.writer_runtime_args.iter().copied());
         program
             .set_runtime_args(writer_id, core, &writer_args)
             .map_err(map_launch_err("writer runtime args"))?;
 
+        let mut compute_args = Vec::with_capacity(1 + sources.compute_runtime_args.len());
+        compute_args.push(sources.num_tiles);
+        compute_args.extend(sources.compute_runtime_args.iter().copied());
         program
-            .set_runtime_args(compute_id, core, &[sources.num_tiles])
+            .set_runtime_args(compute_id, core, &compute_args)
             .map_err(map_launch_err("compute runtime args"))?;
 
         Ok(TtCompiledKernel {
@@ -210,11 +272,19 @@ impl TtContext {
         &mut self,
         cube_kernel: Box<dyn CubeTask<TtCompiler>>,
         mode: ExecutionMode,
-        input_addrs: &[u32],
-        output_addrs: &[u32],
+        resources: &[TtResource],
+        info: &cubecl_runtime::server::MetadataBindingInfo,
         logger: Arc<ServerLogger>,
     ) -> Result<TtCompiledKernel, LaunchError> {
+        let _ = println!(
+            "[compile_cube_task] enter
+"
+        );
         let mut compiler: TtCompiler = Default::default();
+        let _ = println!(
+            "[compile_cube_task] calling cube_kernel.compile()
+"
+        );
         let compiled = cube_kernel
             .compile(
                 &mut compiler,
@@ -222,65 +292,72 @@ impl TtContext {
                 mode,
                 cube_kernel.address_type(),
             )
-            .map_err(|e| LaunchError::Unknown {
-                reason: format!("CubeCL compilation failed: {e:?}"),
-                backtrace: BackTrace::capture(),
-            })?;
+            .map_err(LaunchError::CompilationError)?;
+        let _ = println!(
+            "[compile_cube_task] ir compiled
+"
+        );
 
-        let repr = compiled.repr.as_ref().ok_or_else(|| LaunchError::Unknown {
-            reason: "no IR representation".into(),
-            backtrace: BackTrace::capture(),
+        let repr = compiled.repr.as_ref().ok_or_else(|| {
+            LaunchError::CompilationError(cubecl_runtime::compiler::CompilationError::Generic {
+                reason: "no IR representation".into(),
+                backtrace: BackTrace::capture(),
+            })
         })?;
 
-        let num_tiles = repr.cube_dim.x.max(1);
-        let tile_size_bytes: u32 = 32 * 32 * 2;
-
-        let op_kind = detect_op_from_body(&repr.body, repr.buffers.len() as u32);
-        let sources = match op_kind {
-            TtOpKind::Copy | TtOpKind::Unknown => {
-                TtKernelSources::copy_kernel(num_tiles, tile_size_bytes)
+        let sources = match cubecl_cpp::tt_metal::compile::sources_from_repr(repr, 1) {
+            Ok(sources) => sources,
+            Err(err) => {
+                eprintln!("[compile_cube_task] sources_from_repr failed: {err:?}");
+                return Err(LaunchError::CompilationError(err));
             }
-            TtOpKind::EltwiseBinaryAdd => TtKernelSources::add_kernel(num_tiles, tile_size_bytes),
+        };
+        let prepared = match prepare_launch(repr, sources, resources, info) {
+            Ok(prepared) => prepared,
+            Err(err) => {
+                eprintln!("[compile_cube_task] prepare_launch failed: {err:?}");
+                return Err(err);
+            }
         };
 
-        self.compile_kernel(
-            &sources,
-            input_addrs,
-            output_addrs,
-            &[2, tile_size_bytes],
-            &[2, tile_size_bytes],
+        let _ = println!(
+            "[compile_cube_task] calling compile_kernel
+"
+        );
+        let result = self.compile_kernel(
+            &prepared.sources,
+            &prepared.input_addrs,
+            &prepared.output_addrs,
             logger,
-        )
+        );
+        let _ = println!(
+            "[compile_cube_task] compile_kernel done
+"
+        );
+        result
     }
 }
 
-use cubecl_cpp::Dialect;
-use cubecl_cpp::tt_metal::TtOpKind;
-
-fn detect_op_from_body<D: Dialect>(
-    body: &cubecl_cpp::shared::Body<D>,
-    _num_buffers: u32,
-) -> TtOpKind {
-    for inst in &body.instructions {
-        if matches!(
-            inst,
-            cubecl_cpp::shared::Instruction::Add(_)
-                | cubecl_cpp::shared::Instruction::Mul(_)
-                | cubecl_cpp::shared::Instruction::Sub(_)
-        ) {
-            return TtOpKind::EltwiseBinaryAdd;
-        }
-    }
-    TtOpKind::Copy
-}
-
-fn data_format_to_tt(fmt: u8) -> DataFormat {
+pub(crate) fn data_format_to_tt(fmt: u8) -> Result<DataFormat, LaunchError> {
     match fmt {
-        0 => DataFormat::Float32,
-        1 => DataFormat::Float16,
-        5 => DataFormat::Float16B,
-        _ => DataFormat::Float16B,
+        0 => Ok(DataFormat::Float32),
+        1 => Ok(DataFormat::Float16),
+        5 => Ok(DataFormat::Float16B),
+        8 => Ok(DataFormat::Int32),
+        9 => Ok(DataFormat::UInt16),
+        24 => Ok(DataFormat::UInt32),
+        30 => Ok(DataFormat::UInt8),
+        _ => Err(kernel_build_error(&format!(
+            "unsupported TT data format code: {fmt}"
+        ))),
     }
+}
+
+fn kernel_build_error(reason: &str) -> LaunchError {
+    LaunchError::CompilationError(cubecl_runtime::compiler::CompilationError::Generic {
+        reason: reason.into(),
+        backtrace: BackTrace::capture(),
+    })
 }
 
 fn map_launch_err(context: &'static str) -> impl FnOnce(libtt_metal_cxx::Exception) -> LaunchError {
@@ -288,4 +365,156 @@ fn map_launch_err(context: &'static str) -> impl FnOnce(libtt_metal_cxx::Excepti
         reason: format!("{context}: {}", e.what()),
         backtrace: BackTrace::capture(),
     }
+}
+
+fn map_kernel_build_err(
+    context: &'static str,
+) -> impl FnOnce(libtt_metal_cxx::Exception) -> LaunchError {
+    move |e| kernel_build_error(&format!("{context}: {}", e.what()))
+}
+
+pub(crate) fn prepare_launch(
+    repr: &cubecl_cpp::shared::ComputeKernel<
+        cubecl_cpp::tt_metal::TtMetalDialect<crate::TtWmmaCompiler>,
+    >,
+    mut sources: TtKernelSources,
+    resources: &[TtResource],
+    info: &cubecl_runtime::server::MetadataBindingInfo,
+) -> Result<PreparedLaunch, LaunchError> {
+    if resources.len() != repr.buffers.len() {
+        return Err(kernel_build_error(&format!(
+            "resource/buffer arity mismatch: {} runtime resources for {} compiled buffers",
+            resources.len(),
+            repr.buffers.len()
+        )));
+    }
+
+    let bindings = repr
+        .buffers
+        .iter()
+        .zip(resources.iter())
+        .map(|(binding, resource)| RuntimeBinding {
+            visibility: binding.vis,
+            address: resource.address,
+            logical_size_bytes: resource.size,
+            allocation_size_bytes: resource.allocation_size,
+            compile_args: resource.compile_args.clone(),
+            item_size_bytes: binding.item.size() as u32,
+        })
+        .collect::<Vec<_>>();
+
+    let input_bindings = bindings
+        .iter()
+        .filter(|binding| matches!(binding.visibility, Visibility::Read))
+        .collect::<Vec<_>>();
+    let output_bindings = bindings
+        .iter()
+        .filter(|binding| matches!(binding.visibility, Visibility::ReadWrite))
+        .collect::<Vec<_>>();
+
+    if sources.num_inputs != input_bindings.len() as u32 {
+        return Err(kernel_build_error(&format!(
+            "reader source expects {} inputs but runtime provided {}",
+            sources.num_inputs,
+            input_bindings.len()
+        )));
+    }
+    if sources.num_outputs != output_bindings.len() as u32 {
+        return Err(kernel_build_error(&format!(
+            "writer source expects {} outputs but runtime provided {}",
+            sources.num_outputs,
+            output_bindings.len()
+        )));
+    }
+
+    let input_addrs = input_bindings
+        .iter()
+        .map(|binding| binding.address)
+        .collect::<Vec<_>>();
+    let output_addrs = output_bindings
+        .iter()
+        .map(|binding| binding.address)
+        .collect::<Vec<_>>();
+    let reader_compile_args = input_bindings
+        .iter()
+        .flat_map(|binding| binding.compile_args.iter().copied())
+        .collect::<Vec<_>>();
+    let writer_compile_args = output_bindings
+        .iter()
+        .flat_map(|binding| binding.compile_args.iter().copied())
+        .collect::<Vec<_>>();
+    sources = sources.with_compile_args(reader_compile_args, writer_compile_args);
+
+    if !sources.buffer_item_sizes.is_empty() {
+        if sources.buffer_item_sizes.len() != bindings.len() {
+            return Err(kernel_build_error(&format!(
+                "static metadata expects {} buffer item sizes but runtime provided {} resources",
+                sources.buffer_item_sizes.len(),
+                bindings.len(),
+            )));
+        }
+
+        for (index, (expected, binding)) in sources
+            .buffer_item_sizes
+            .iter()
+            .zip(bindings.iter())
+            .enumerate()
+        {
+            if *expected != binding.item_size_bytes {
+                return Err(kernel_build_error(&format!(
+                    "buffer item size mismatch at binding {index}: compiler expected {} bytes but runtime binding uses {} bytes",
+                    expected, binding.item_size_bytes,
+                )));
+            }
+        }
+    }
+
+    if !info.data.is_empty() {
+        let packed_info_words = bytemuck::cast_slice::<u64, u32>(&info.data).to_vec();
+        sources = sources.with_writer_runtime_args(packed_info_words);
+    } else {
+        if repr.body.has_dynamic_meta {
+            return Err(kernel_build_error(
+                "TT-Metal generic kernels require metadata info runtime args for dynamic tensor metadata",
+            ));
+        }
+
+        if sources.info_static_len > 0 {
+            if sources.buffer_item_sizes.len() != bindings.len() {
+                return Err(kernel_build_error(&format!(
+                    "cannot derive static metadata for {} bindings from {} item sizes",
+                    bindings.len(),
+                    sources.buffer_item_sizes.len(),
+                )));
+            }
+
+            let logical_lengths = bindings
+                .iter()
+                .zip(sources.buffer_item_sizes.iter())
+                .map(|(binding, item_size)| {
+                    let item_size = u64::from((*item_size).max(1));
+                    binding.logical_size_bytes.div_ceil(item_size) as u32
+                })
+                .collect::<Vec<_>>();
+            let mut compute_runtime_args = Vec::with_capacity(logical_lengths.len() * 2);
+            compute_runtime_args.extend(logical_lengths.iter().copied());
+            compute_runtime_args.extend(logical_lengths.iter().copied());
+            if compute_runtime_args.len() != sources.info_static_len {
+                return Err(kernel_build_error(&format!(
+                    "compute runtime args mismatch: derived {} static args for info_static_len {}",
+                    compute_runtime_args.len(),
+                    sources.info_static_len,
+                )));
+            }
+            sources = sources.with_compute_runtime_args(compute_runtime_args.clone());
+            sources = sources.with_writer_runtime_args(compute_runtime_args);
+        }
+    }
+
+    Ok(PreparedLaunch {
+        sources,
+        input_addrs,
+        output_addrs,
+        bindings,
+    })
 }

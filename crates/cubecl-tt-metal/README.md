@@ -48,9 +48,9 @@ cubecl-cpp/src/tt_metal/          ← Compiler dialect (in cubecl-cpp crate)
 - **Phase 0**: `libtt-metal-cxx` bindings extended with `MeshBuffer` I/O — ✅
 - **Phase 1**: Crate scaffolding, dialect stubs, workspace wiring — ✅
 - **Phase 2**: End-to-end copy kernel compiles and executes on hardware — ✅
-- **Phase 3**: Data tilization (tilize_nfaces/untilize_nfaces) — 🔴 planned
-- **Phase 4**: IR-driven compute kernel generation — 🔴 planned
-- **Phase 5**: Full CubeCL pipeline integration + test suite — 🔴 planned
+- **Phase 3**: TT-local `cubecl_std` spot coverage (`trigonometry`, global `reinterpret_slice`, current `event`) — ✅
+- **Phase 4**: Targeted TT-local `cubecl_core` hardware subset, including loop-free `assign` coverage — ✅
+- **Phase 5**: Burn downstream smoke validation — 🟡 next
 
 ## Building & Testing
 

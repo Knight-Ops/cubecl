@@ -30,25 +30,39 @@ use std::sync::OnceLock;
 /// Wrapper around `Box<MeshDevice>` that implements `Sync`.
 ///
 /// SAFETY: `MeshDevice` is only accessed from one thread at a time
-/// (serialized by `CubeCL`'s `DeviceHandle` mutex). The `OnceLock`
+/// (serialized by CubeCL's `DeviceHandle` mutex). The `OnceLock`
 /// ensures single initialization.
-struct MeshSingleton(Box<libtt_metal_cxx::MeshDevice>);
+struct MeshSingleton {
+    device: Box<libtt_metal_cxx::MeshDevice>,
+    /// A permanently-allocated buffer that keeps TT-Metal's runtime
+    /// state properly initialized. Without a live MeshBuffer, the
+    /// first `write_mesh_buffer` to a newly-allocated buffer crashes
+    /// with SIGSEGV inside the TT-Metal driver.
+    _warmup: libtt_metal_cxx::MeshBuffer,
+}
 unsafe impl Send for MeshSingleton {}
 unsafe impl Sync for MeshSingleton {}
 
 /// Process-level singleton for the TT-Metal device.
-static MESH_SINGLETON: OnceLock<MeshSingleton> = OnceLock::new();
+static MESH_SINGLETON: OnceLock<&'static MeshSingleton> = OnceLock::new();
 
 /// Get (or open) the process-level `MeshDevice`.
 ///
 /// The returned reference is valid for the entire program lifetime.
 pub fn get_mesh() -> &'static libtt_metal_cxx::MeshDevice {
     let wrapper = MESH_SINGLETON.get_or_init(|| {
-        MeshSingleton(Box::new(
+        let device = Box::new(
             libtt_metal_cxx::MeshDevice::create_unit_mesh(0).expect("failed to open TT device 0"),
-        ))
+        );
+        let mesh: &libtt_metal_cxx::MeshDevice = &device;
+        let warmup = libtt_metal_cxx::MeshBuffer::create_replicated(mesh, 4096, 2048, 0)
+            .expect("warmup buffer allocation");
+        Box::leak(Box::new(MeshSingleton {
+            device,
+            _warmup: warmup,
+        }))
     });
-    &wrapper.0
+    &wrapper.device
 }
 
 /// The values that control how a TT-Metal Runtime will perform its calculations.
@@ -67,15 +81,28 @@ pub type TtCompiler = CppCompiler<TtMetalDialect<TtWmmaCompiler>>;
 pub const TILE_WIDTH: u32 = 32;
 pub const TILE_HEIGHT: u32 = 32;
 pub const TILE_ELEMENTS: u32 = TILE_WIDTH * TILE_HEIGHT;
+pub const TT_MEMORY_ALIGNMENT: u64 = 32;
+pub const TT_MAX_PAGE_SIZE_BYTES: u64 = 2 * 1024 * 1024;
+pub const TT_DEFAULT_BUFFER_PAGE_SIZE_BYTES: u64 = 2048;
 
 /// Maximum number of kernel bindings supported by TT-Metal.
 pub const TT_MAX_BINDINGS: u32 = 16;
 
+pub(crate) fn tt_memory_properties() -> MemoryDeviceProperties {
+    MemoryDeviceProperties {
+        max_page_size: TT_MAX_PAGE_SIZE_BYTES,
+        alignment: TT_MEMORY_ALIGNMENT,
+    }
+}
+
 impl DeviceService for TtServer {
     fn init(device_id: cubecl_common::device::DeviceId) -> Self {
+        println!("[DeviceService::init] enter");
         let _device = TtDevice::from_id(device_id);
 
+        println!("[DeviceService::init] calling get_mesh()");
         let mesh: &'static libtt_metal_cxx::MeshDevice = get_mesh();
+        println!("[DeviceService::init] get_mesh() done");
 
         let arch = cubecl_cpp::tt_metal::TtArchitecture::Wormhole;
         let warp_size = arch.warp_size();
@@ -99,10 +126,7 @@ impl DeviceService for TtServer {
             max_vector_size: VectorSize::MAX,
         };
 
-        let mem_properties = MemoryDeviceProperties {
-            max_page_size: 16 * 1024 * 1024,
-            alignment: 32,
-        };
+        let mem_properties = tt_memory_properties();
 
         let mut device_props = DeviceProperties::new(
             Default::default(),
@@ -130,7 +154,10 @@ impl DeviceService for TtServer {
         let utilities = ServerUtilities::new(device_props, logger, (), policy);
         let options = RuntimeOptions::default();
 
-        TtServer::new(mesh, ctx, mem_properties, options.memory_config, utilities)
+        println!("[DeviceService::init] calling TtServer::new()");
+        let server = TtServer::new(mesh, ctx, mem_properties, options.memory_config, utilities);
+        println!("[DeviceService::init] done");
+        server
     }
 
     fn utilities(&self) -> ServerUtilitiesHandle {

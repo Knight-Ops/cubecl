@@ -1,7 +1,7 @@
 use super::storage::gpu::{TtResource, TtStorage};
 use crate::{
     compute::{command::Command, context::TtContext, stream::TtStreamBackend},
-    runtime::TtCompiler,
+    runtime::{TtCompiler, tt_memory_properties},
 };
 use cubecl_cpp::tt_metal::TtKernelSources;
 
@@ -71,6 +71,7 @@ impl ComputeServer for TtServer {
     }
 
     fn initialize_memory(&mut self, memory: ManagedMemoryHandle, size: u64, stream_id: StreamId) {
+        println!("[initialize_memory] size={size}");
         let mut command = match self.command_no_inputs(
             stream_id,
             StreamErrorMode {
@@ -81,8 +82,13 @@ impl ComputeServer for TtServer {
             Ok(val) => val,
             Err(err) => unreachable!("{err:?}"),
         };
-        let reserved = command.reserve(size).unwrap();
-        command.bind(reserved, memory);
+        match command.reserve(size) {
+            Ok(reserved) => {
+                command.bind(reserved, memory);
+                println!("[initialize_memory] done");
+            }
+            Err(err) => command.error(ServerError::Io(err)),
+        }
     }
 
     fn read(
@@ -115,6 +121,7 @@ impl ComputeServer for TtServer {
     }
 
     fn write(&mut self, descriptors: Vec<(CopyDescriptor, Bytes)>, stream_id: StreamId) {
+        println!("[write] enter {} descriptors", descriptors.len());
         let mut command = match self.command(
             stream_id,
             descriptors.iter().map(|desc| &desc.0.handle),
@@ -136,6 +143,7 @@ impl ComputeServer for TtServer {
                 return;
             }
         }
+        println!("[write] done");
     }
 
     unsafe fn launch(
@@ -146,30 +154,36 @@ impl ComputeServer for TtServer {
         mode: ExecutionMode,
         stream_id: StreamId,
     ) {
+        let _ = println!("[launch] enter\n");
         if let Err(err) = self.launch_checked(kernel, count, bindings, mode, stream_id) {
             let mut stream = match self.streams.resolve(stream_id, [].into_iter(), false) {
                 Ok(stream) => stream,
                 Err(err) => unreachable!("{err:?}"),
             };
-            stream.current().errors.push(err);
+            stream.current().error(err);
         }
+        let _ = println!("[launch] exit\n");
     }
 
     fn flush(&mut self, stream_id: StreamId) -> Result<(), ServerError> {
-        let mut command = self.command_no_inputs(
+        self.flush_stream_errors(
             stream_id,
             StreamErrorMode {
                 ignore: false,
                 flush: true,
             },
-        )?;
-        // Flush GPU storage (synchronous — no-op for TT)
-        let _current = command.streams.current();
-        Ok(())
+        )
     }
 
-    fn sync(&mut self, _stream_id: StreamId) -> DynFut<Result<(), ServerError>> {
-        Box::pin(async { Ok(()) })
+    fn sync(&mut self, stream_id: StreamId) -> DynFut<Result<(), ServerError>> {
+        let result = self.flush_stream_errors(
+            stream_id,
+            StreamErrorMode {
+                ignore: false,
+                flush: true,
+            },
+        );
+        Box::pin(async move { result })
     }
 
     fn start_profile(&mut self, _stream_id: StreamId) -> Result<ProfilingToken, ServerError> {
@@ -265,9 +279,7 @@ impl TtServer {
         let mesh = crate::runtime::get_mesh();
 
         use cubecl_common::profile::TimingMethod;
-        use cubecl_core::ir::{
-            DeviceProperties, HardwareProperties, MemoryDeviceProperties, VectorSize,
-        };
+        use cubecl_core::ir::{DeviceProperties, HardwareProperties, VectorSize};
         use cubecl_cpp::shared::{Architecture, CompilationOptions, CppSupportedFeatures};
         use cubecl_cpp::tt_metal::TtArchitecture;
 
@@ -290,10 +302,7 @@ impl TtServer {
             max_vector_size: VectorSize::MAX,
         };
 
-        let mem_properties = MemoryDeviceProperties {
-            max_page_size: 16 * 1024 * 1024,
-            alignment: 32,
-        };
+        let mem_properties = tt_memory_properties();
 
         let mut device_props = DeviceProperties::new(
             Default::default(),
@@ -330,24 +339,28 @@ impl TtServer {
     pub(crate) fn new(
         mesh: &'static libtt_metal_cxx::MeshDevice,
         ctx: TtContext,
-        _mem_props: MemoryDeviceProperties,
-        _mem_config: MemoryConfiguration,
+        mem_props: MemoryDeviceProperties,
+        mem_config: MemoryConfiguration,
         utilities: ServerUtilities<Self>,
     ) -> Self {
+        println!("[TtServer::new] enter");
         let config = CubeClRuntimeConfig::get();
         let max_streams = config.streaming.max_streams;
 
         // Take a raw pointer to the mesh. Since mesh is &'static,
         // the pointed-to value lives for the entire program lifetime.
         let mesh_ptr: *const libtt_metal_cxx::MeshDevice = mesh;
-        let backend = TtStreamBackend::new(mesh_ptr);
+        let backend = TtStreamBackend::new(mesh_ptr, mem_props, mem_config.clone());
 
-        Self {
+        println!("[TtServer::new] creating MultiStream");
+        let server = Self {
             mesh,
             ctx,
             streams: MultiStream::new(utilities.logger.clone(), backend, max_streams),
             utilities: Arc::new(utilities),
-        }
+        };
+        println!("[TtServer::new] done");
+        server
     }
 
     /// Access the underlying `MeshDevice`.
@@ -364,6 +377,7 @@ impl TtServer {
         mode: ExecutionMode,
         stream_id: StreamId,
     ) -> Result<(), ServerError> {
+        let _ = println!("[launch_checked] enter\n");
         let logger = self.streams.logger.clone();
         let mut command = self.command(
             stream_id,
@@ -374,15 +388,12 @@ impl TtServer {
             },
         )?;
 
-        // Resolve buffer addresses from bindings
-        // Standard CubeCL convention: last buffer is output, preceding are inputs
         let resources: Vec<_> = bindings
             .buffers
             .iter()
             .map(|b| {
                 command
                     .resource(b.clone())
-                    .map(|r| r.address)
                     .map_err(|e| ServerError::Generic {
                         reason: format!("resource: {e:?}"),
                         backtrace: BackTrace::capture(),
@@ -390,19 +401,10 @@ impl TtServer {
             })
             .collect::<Result<Vec<_>, _>>()?;
 
-        let (input_addrs, output_addrs) = if resources.len() <= 1 {
-            (resources.as_slice(), [].as_slice())
-        } else {
-            let split = resources.len() - 1;
-            (&resources[..split], &resources[split..])
-        };
-
+        let _ = println!("[launch_checked] calling kernel_cube\n");
         command
-            .kernel_cube(kernel, mode, input_addrs, output_addrs, logger)
-            .map_err(|e| ServerError::Generic {
-                reason: format!("{e:?}"),
-                backtrace: BackTrace::capture(),
-            })
+            .kernel_cube(kernel, mode, &resources, &bindings.info, logger)
+            .map_err(ServerError::Launch)
     }
 
     /// Launch a kernel from pre-built TT-Metal sources.
@@ -423,19 +425,12 @@ impl TtServer {
                 flush: false,
             },
         )?;
+        let sources = sources
+            .clone()
+            .with_compile_args(reader_compile_args.to_vec(), writer_compile_args.to_vec());
         command
-            .kernel(
-                sources,
-                input_addrs,
-                output_addrs,
-                reader_compile_args,
-                writer_compile_args,
-                logger,
-            )
-            .map_err(|e| ServerError::Generic {
-                reason: format!("{e:?}"),
-                backtrace: BackTrace::capture(),
-            })
+            .kernel(&sources, input_addrs, output_addrs, logger)
+            .map_err(ServerError::Launch)
     }
 
     fn command_no_inputs(
@@ -444,6 +439,15 @@ impl TtServer {
         mode: StreamErrorMode,
     ) -> Result<Command<'_>, ServerError> {
         self.command(stream_id, [].into_iter(), mode)
+    }
+
+    fn flush_stream_errors(
+        &mut self,
+        stream_id: StreamId,
+        mode: StreamErrorMode,
+    ) -> Result<(), ServerError> {
+        let mut streams = self.streams.resolve(stream_id, [].into_iter(), false)?;
+        streams.current().flush_errors(mode)
     }
 
     fn command<'a>(

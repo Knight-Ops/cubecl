@@ -6,12 +6,30 @@ use std::collections::HashMap;
 use libtt_metal_cxx::MeshBuffer;
 use libtt_metal_cxx::MeshDevice;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TtBufferLayout {
+    Replicated,
+    Sharded,
+}
+
+#[derive(Debug)]
+struct TtBufferAllocation {
+    mesh_buffer: MeshBuffer,
+    layout: TtBufferLayout,
+}
+
+use crate::runtime::{TT_DEFAULT_BUFFER_PAGE_SIZE_BYTES, TT_MEMORY_ALIGNMENT};
+
 /// A GPU memory resource for TT-Metal.
 #[derive(Debug, Clone)]
 pub struct TtResource {
     pub storage_id: StorageId,
     pub address: u32,
     pub size: u64,
+    pub allocation_size: u64,
+    pub allocation_offset: u64,
+    pub compile_args: Vec<u32>,
+    pub layout: TtBufferLayout,
 }
 
 // SAFETY: TtStorage is only accessed from one thread at a time.
@@ -20,11 +38,11 @@ unsafe impl Send for TtStorage {}
 /// GPU storage for TT-Metal device memory.
 ///
 /// Manages allocations using TT-Metal replicated `MeshBuffers` in DRAM.
-/// All allocations are tile-aligned (multiples of `32×32×element_size`).
+/// All allocations are tile-aligned (multiples of `page_size`).
 #[derive(Debug)]
 pub struct TtStorage {
     mesh_ptr: *const MeshDevice,
-    buffers: HashMap<StorageId, MeshBuffer>,
+    buffers: HashMap<StorageId, TtBufferAllocation>,
     next_id: StorageId,
     page_size: u64,
 }
@@ -36,7 +54,7 @@ impl TtStorage {
             mesh_ptr: std::ptr::null(),
             buffers: HashMap::new(),
             next_id: StorageId::new(),
-            page_size: 2048, // default: one bfloat16 tile = 32*32*2 = 2048 bytes
+            page_size: TT_DEFAULT_BUFFER_PAGE_SIZE_BYTES,
         }
     }
 
@@ -50,7 +68,12 @@ impl TtStorage {
     }
 
     pub fn get_mesh_buffer(&self, id: StorageId) -> &MeshBuffer {
-        self.buffers.get(&id).expect("MeshBuffer not found")
+        println!("[get_mesh_buffer] id={id:?}");
+        &self.buffers.get(&id).expect("MeshBuffer not found").mesh_buffer
+    }
+
+    pub fn get_layout(&self, id: StorageId) -> TtBufferLayout {
+        self.buffers.get(&id).expect("MeshBuffer not found").layout
     }
 }
 
@@ -58,55 +81,67 @@ impl ComputeStorage for TtStorage {
     type Resource = TtResource;
 
     fn alignment(&self) -> usize {
-        32 // Minimum TT-Metal alignment
+        TT_MEMORY_ALIGNMENT as usize
     }
 
     fn get(&mut self, handle: &StorageHandle) -> Self::Resource {
         let id = handle.id;
         let buffer = self.buffers.get(&id).expect("Buffer not found");
+        let compile_args = buffer
+            .mesh_buffer
+            .compile_args()
+            .expect("failed to compute TT compile args for MeshBuffer");
+        let address = u64::from(buffer.mesh_buffer.address())
+            .checked_add(handle.offset())
+            .and_then(|addr| u32::try_from(addr).ok())
+            .expect("TT resource address should stay within 32-bit DRAM address space");
         TtResource {
             storage_id: id,
-            address: buffer.address(),
-            size: buffer.size(),
+            address,
+            size: handle.size(),
+            allocation_size: buffer.mesh_buffer.size(),
+            allocation_offset: handle.offset(),
+            compile_args,
+            layout: buffer.layout,
         }
     }
 
     fn alloc(&mut self, size: u64) -> Result<StorageHandle, IoError> {
         let mesh = self.mesh();
-        // Tile-align: round up to nearest page_size boundary
         let aligned_size = size.div_ceil(self.page_size) * self.page_size;
         let page_size = self.page_size;
 
-        let buffer = MeshBuffer::create_replicated(
-            mesh,
-            aligned_size,
-            page_size,
-            0, // DRAM
-        )
-        .map_err(|e| IoError::Unknown {
-            backtrace: BackTrace::capture(),
-            description: format!("failed to allocate MeshBuffer: {}", e.what()),
-        })?;
+        println!("[TtStorage::alloc] aligned_size={aligned_size}");
+        let buffer =
+            MeshBuffer::create_replicated(mesh, aligned_size, page_size, 0).map_err(|e| {
+                IoError::Unknown {
+                    backtrace: BackTrace::capture(),
+                    description: format!("failed to allocate MeshBuffer: {}", e.what()),
+                }
+            })?;
 
         let id = self.next_id;
         self.next_id = StorageId::new();
-        self.buffers.insert(id, buffer);
+        println!("[TtStorage::alloc] id={id:?} addr={:#x}", buffer.address());
+        self.buffers.insert(
+            id,
+            TtBufferAllocation {
+                mesh_buffer: buffer,
+                layout: TtBufferLayout::Replicated,
+            },
+        );
 
         Ok(StorageHandle::new(
             id,
-            StorageUtilization {
-                offset: 0,
-                size: aligned_size,
-            },
+            StorageUtilization { offset: 0, size },
         ))
     }
 
     fn dealloc(&mut self, id: StorageId) {
-        // MeshBuffer is deallocated on drop
         self.buffers.remove(&id);
     }
 
     fn flush(&mut self) {
-        // Nothing to flush in synchronous mode
+        // Nothing to flush in synchronous mode.
     }
 }

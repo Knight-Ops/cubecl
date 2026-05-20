@@ -127,103 +127,44 @@ the hardware engines for the CB data format.
 
 ---
 
-## 🔴 Next — Phase 4: IR-Driven Compute Kernel
+## ✅ Complete — Phase 4: Targeted `cubecl_core` Runtime Coverage
 
-**Current state**: The compute kernel is a hardcoded `copy_tile` template
-(`writer.rs::generate_copy_compute_source`). The CubeCL IR pipeline is not used.
+**Current state**: The TT backend now compiles and runs a documented TT-local,
+hardware-gated `cubecl_core` subset through the real CubeCL IR pipeline.
 
-**Goal**: A CubeCL `#[cube]` kernel written in Rust compiles through
-`CppCompiler<TtMetalDialect>` and runs on TT hardware.
+**Green hardware subset**:
+- launch basics (`with_generics`, `without_generics`, `with_comptime_tag`)
+- properties and constant-array coverage
+- metadata/addressing for `AddressType::U32` and `AddressType::U64`
+- different-rank tensor behavior
+- loop-free `assign` coverage (`assign_scalar`, `add_assign_array`)
+- `u32` comparisons
 
-### 4a. `DialectBindings::compile_kernel_signature`
-Currently emits `void kernel_main()`. Must emit proper kernel entry point with
-runtime args via `get_arg_val<uint32_t>(N)`. The `kernel_main` signature is
-standard for TT kernels.
+**Still intentionally deferred in the TT harness**:
+- `numeric::*` until the remaining TT correctness/environment issues are isolated
+- `index::test_assign_index` until sliced-array out-of-bounds semantics are fixed
+- `branch::test_select_*` until scalar kernel arguments are supported
+- `assign::test_kernel_add_assign_vector` until unrolled loop lowering is supported
 
-### 4b. `DialectInstructions` — op mapping
-Map CubeCL IR ops to TT compute API calls. The first ops to implement:
-
-| CubeCL IR | TT Compute API | CB/Register management |
-|-----------|---------------|----------------------|
-| `Load(global_ptr)` | `copy_tile(cb_in, 0, dst_reg)` | `cb_wait_front` → copy → `cb_pop_front` |
-| `Store(global_ptr, val)` | `pack_tile(dst_reg, cb_out)` | `pack_tile` → `cb_push_back` |
-| Binary add (`+`) | `add_tiles(cb_in0, cb_in1, 0, 0, dst_reg)` | `tile_regs_acquire` → add → `tile_regs_commit`/`wait` |
-| Binary mul (`*`) | `mul_tiles(cb_in0, cb_in1, 0, 0, dst_reg)` | Same pattern |
-| Unary sin | `sin_tile(dst_reg)` | `copy_tile` → `sin_tile` → `pack_tile` |
-
-The CB/register management must wrap each op:
-```cpp
-cb_wait_front(cb_in, 1);
-tile_regs_acquire();
-copy_tile(cb_in, 0, dst_reg);  // or add_tiles, mul_tiles, sin_tile...
-tile_regs_commit();
-tile_regs_wait();
-cb_pop_front(cb_in, 1);
-cb_reserve_back(cb_out, 1);
-pack_tile(dst_reg, cb_out);
-cb_push_back(cb_out, 1);
-tile_regs_release();
-```
-
-### 4c. `DialectCubeBuiltins` — SIMT → SPSD mapping
-CubeCL uses `UNIT_POS_X` (thread index within a block). TT has no threads —
-it processes tiles sequentially on a single RISC-V. The `cube_dim` maps to
-tile count. Implementation:
-- `UNIT_POS_X` → loop variable `i`
-- `CUBE_DIM_X` → `num_tiles` from runtime arg
-- `CUBE_POS_X` → `0` (single core)
-- `CUBE_COUNT_X` → `1` (single core)
-
-### 4d. `DialectIncludes` — compute API headers
-Already stubbed. Must include the right headers based on which ops are used:
-- `#include "compute_kernel_api.h"` — always
-- `#include "compute_kernel_api/eltwise_binary.h"` — for `add_tiles`, `mul_tiles`, etc.
-- `#include "compute_kernel_api/tile_move_copy.h"` — for `copy_tile`
-- `#include "compute_kernel_api/eltwise_unary/sfpu_trigonometry.h"` — for SFPU functions like `sin_tile`
-
-### 4e. `KernelDefinition` → `TtKernelSources`
-Wire `CppCompiler<TtMetalDialect>` to produce a `TtKernelSources` from a CubeCL
-`KernelDefinition`. Currently the compiler produces a single `ComputeKernel`
-with one source string. We need to:
-- Call `CppCompiler::compile()` to get the compute kernel source
-- Generate reader/writer sources from templates (parameterized by input/output
-  count from the IR analysis)
-- Return a `TtKernelSources`
-
-### Test
-A CubeCL kernel (`#[cube]`) that adds two tensors, compiled through the full
-pipeline and executed on hardware.
-
-**Resources**:
-- HIP compute kernel generation: `crates/cubecl-cpp/src/hip/dialect.rs` — reference for how `DialectInstructions` methods are structured
-- `crates/cubecl-cpp/src/shared/dialect.rs` — trait definitions for all `Dialect*` methods
-- TT compute API reference: https://docs.tenstorrent.com/tt-metal/latest/tt-metalium/tt_metal/apis/kernel_apis/compute/index.html
-- VecAdd compute kernel (cleanest example of TT compute API): https://raw.githubusercontent.com/tenstorrent/tt-metal/refs/heads/main/tt_metal/programming_examples/contributed/vecadd/kernels/add.cpp
+**Key takeaway**: Phase 4 is now a correctness-focused, documented subset rather
+than an optimistic mirror of the broad upstream generated suite.
 
 ---
 
-## 🔴 Next — Phase 5: IR Pipeline Integration
+## 🟡 Next — Phase 5: Burn Downstream Validation
 
-### 5a. `TtServer::launch` — IR-driven
-Currently `TtServer::launch` is a stub. Must:
-- Accept `Box<dyn CubeTask<TtCompiler>>` (the CubeCL kernel)
-- Extract the `KernelDefinition` from the task
-- Compile through `CppCompiler` → `TtKernelSources`
-- Create Program, CBs, kernels via `TtContext::compile_kernel`
-- Enqueue workload
+**Current state**: The TT-local Phase 4 hardware subset is green. The next milestone is proving the backend against a real Burn workload rather than widening local wrapper coverage blindly.
 
-### 5b. `TtServer::read` / `write` — through CubeCL memory model
-Currently the read/write in `Command` uses raw `MeshBuffer` addresses from
-`TtResource`. Must integrate with CubeCL's `Binding` / `CopyDescriptor` /
-`MemoryManagement` system so that data flows:
-```
-host → ComputeClient.write() → TtServer.write() → Command.write_to_gpu → MeshDevice.write_mesh_buffer
-```
+### 5a. Burn smoke entrypoint
+- Add a hardware-gated TT smoke integration test in the Burn repo, not this repo.
+- Validate tensor allocation/read-write, a simple forward op, one backward pass, one optimizer step, and one tiny training iteration.
 
-### 5c. Enable `testgen!()` macros
-Uncomment the `testgen!()` / `testgen_all!()` macros in `src/lib.rs` once the
-IR pipeline works end-to-end. These run the CubeCL standard test suite against
-the TT backend.
+### 5b. Backfill downstream gaps
+- Classify each Burn failure as a `cubecl-tt-metal backend gap`, `Burn runtime/backend glue gap`, or `environment/tooling issue`.
+- Add a reduced TT regression in this repo for every backend gap when practical.
+
+### 5c. Environment note
+- Burn work is currently blocked until a Burn checkout is available alongside this repo.
 
 ---
 

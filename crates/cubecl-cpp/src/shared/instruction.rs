@@ -602,7 +602,6 @@ for ({i_ty} {i} = {start}; {i} {cmp} {end}; {increment}) {{
             Instruction::Fma { a, b, c, out } => Fma::format(f, a, b, c, out),
             Instruction::Wmma(it) => write!(f, "{it}"),
             Instruction::Bitcast(UnaryInstruction { input, out }) => {
-                let qualifier = out.const_qualifier();
                 let input_item = input.item();
                 let out_item = out.item();
 
@@ -611,12 +610,16 @@ for ({i_ty} {i} = {start}; {i} {cmp} {end}; {increment}) {{
                 {
                     panic!("Unsupported type for bitcasting {out_item:?} from {input_item:?}");
                 } else {
-                    let out = out.fmt_left();
-                    let addr_space = D::address_space_for_variable(input);
+                    let out_decl = out.fmt_left();
+                    writeln!(f, "{out_decl} = [&]() {{")?;
+                    writeln!(f, "    {input_item} cubecl_bitcast_in = {input};")?;
+                    writeln!(f, "    {out_item} cubecl_bitcast_out;")?;
                     writeln!(
                         f,
-                        "{out} = reinterpret_cast<{addr_space}{out_item}{qualifier}&>({input});"
-                    )
+                        "    __builtin_memcpy(&cubecl_bitcast_out, &cubecl_bitcast_in, sizeof(cubecl_bitcast_out));"
+                    )?;
+                    writeln!(f, "    return cubecl_bitcast_out;")?;
+                    writeln!(f, "}}();")
                 }
             }
             Instruction::AtomicAdd(BinaryInstruction { lhs, rhs, out }) => {
