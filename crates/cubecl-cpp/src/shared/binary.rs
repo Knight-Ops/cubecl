@@ -155,8 +155,8 @@ impl<D: Dialect> Binary<D> for HiMul {
     ) -> std::fmt::Result {
         let out_elem = out.elem;
         match out_elem {
-            Elem::I32 => write!(f, "__mulhi({lhs}, {rhs})"),
-            Elem::U32 => write!(f, "__umulhi({lhs}, {rhs})"),
+            Elem::I32 => write!(f, "int32_t((int64_t({lhs}) * int64_t({rhs})) >> 32)"),
+            Elem::U32 => write!(f, "uint32_t((uint64_t({lhs}) * uint64_t({rhs})) >> 32)"),
             Elem::I64 => write!(f, "__mul64hi({lhs}, {rhs})"),
             Elem::U64 => write!(f, "__umul64hi({lhs}, {rhs})"),
             _ => writeln!(f, "#error HiMul only supports 32 and 64 bit ints"),

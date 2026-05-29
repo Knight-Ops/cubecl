@@ -7,8 +7,10 @@ use cubecl_core::ir::Processor;
 
 use crate::Dialect;
 use crate::shared::Instruction;
+use crate::shared::binary::{Add, Binary, Max, Min};
 use crate::shared::{
     self, Component, DialectBindings, DialectCubeBuiltins, DialectIncludes, DialectInstructions,
+    FmtLeft,
     DialectProcessors, DialectTypes, DialectWarpReduceCompiler, DialectWmmaCompiler, Elem, Flags,
     Fragment, FragmentIdent, FragmentLayout, Item, KernelArg, ManualMma, SupportedMmaCombinations,
     SupportedScaledMmaCombinations, Variable, WarpInstruction, WmmaInstruction,
@@ -123,6 +125,37 @@ impl<Wmma: DialectWmmaCompiler<Self>> DialectTypes<Self> for TtMetalDialect<Wmma
     fn compile_local_memory_qualifier(_f: &mut fmt::Formatter<'_>) -> fmt::Result {
         Ok(())
     }
+
+    fn compile_shared_memory_declaration(
+        f: &mut fmt::Formatter<'_>,
+        shared: &shared::SharedMemory<Self>,
+    ) -> fmt::Result {
+        match shared {
+            shared::SharedMemory::Array {
+                index,
+                item,
+                length,
+                align,
+                ..
+            } => {
+                let size_bytes = length * item.size();
+                let align = (*align).max(1);
+                writeln!(f, "// TT shared scratch array size: {length}, {size_bytes} bytes")?;
+                writeln!(f, "alignas({align}) {item} shared_memory_{index}[{length}];")
+            }
+            shared::SharedMemory::Value {
+                index,
+                item,
+                align,
+                ..
+            } => {
+                let size_bytes = item.size();
+                let align = (*align).max(1);
+                writeln!(f, "// TT shared scratch value size: {size_bytes} bytes")?;
+                writeln!(f, "alignas({align}) {item} shared_memory_{index};")
+            }
+        }
+    }
 }
 
 // ── Kernel Bindings ───────────────────────────────────────────────────────
@@ -167,13 +200,13 @@ impl<Wmma: DialectWmmaCompiler<Self>> DialectCubeBuiltins<Self> for TtMetalDiale
         write!(f, "cube_count")
     }
     fn compile_cube_count_x(f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "1")
+        write!(f, "cube_count_x")
     }
     fn compile_cube_count_y(f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "1")
+        write!(f, "cube_count_y")
     }
     fn compile_cube_count_z(f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "1")
+        write!(f, "cube_count_z")
     }
 
     fn compile_cube_dim_base_name(f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -183,13 +216,13 @@ impl<Wmma: DialectWmmaCompiler<Self>> DialectCubeBuiltins<Self> for TtMetalDiale
         write!(f, "cube_dim")
     }
     fn compile_cube_dim_x(f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "num_tiles")
+        write!(f, "cube_dim_x")
     }
     fn compile_cube_dim_y(f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "1")
+        write!(f, "cube_dim_y")
     }
     fn compile_cube_dim_z(f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "1")
+        write!(f, "cube_dim_z")
     }
 
     fn compile_cube_pos_base_name(f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -199,29 +232,35 @@ impl<Wmma: DialectWmmaCompiler<Self>> DialectCubeBuiltins<Self> for TtMetalDiale
         write!(f, "cube_pos")
     }
     fn compile_cube_pos_x(f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "0")
+        write!(f, "cube_pos_x")
     }
     fn compile_cube_pos_y(f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "0")
+        write!(f, "cube_pos_y")
     }
     fn compile_cube_pos_z(f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "0")
+        write!(f, "cube_pos_z")
     }
 
     fn compile_unit_pos_base_name(f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "unit_pos")
     }
+    fn compile_unit_pos_computation(f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let variable = Variable::<Self>::UnitPos;
+        let ty = variable.item();
+        writeln!(f, "{ty} {variable} = unit_idx;")
+    }
+
     fn compile_unit_pos(f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "unit_pos")
     }
     fn compile_unit_pos_x(f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "i")
+        write!(f, "unit_pos_x")
     }
     fn compile_unit_pos_y(f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "0")
+        write!(f, "unit_pos_y")
     }
     fn compile_unit_pos_z(f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "0")
+        write!(f, "unit_pos_z")
     }
 
     fn compile_plane_dim(f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -254,6 +293,58 @@ impl<Wmma: DialectWmmaCompiler<Self>> DialectCubeBuiltins<Self> for TtMetalDiale
 // ── Instructions ──────────────────────────────────────────────────────────
 
 impl<Wmma: DialectWmmaCompiler<Self>> DialectInstructions<Self> for TtMetalDialect<Wmma> {
+    fn compile_atomic_load(
+        f: &mut fmt::Formatter<'_>,
+        input: &Variable<Self>,
+        out: &Variable<Self>,
+    ) -> fmt::Result {
+        writeln!(f, "{} = *{};", out.fmt_left(), input)
+    }
+
+    fn compile_atomic_store(
+        f: &mut fmt::Formatter<'_>,
+        input: &Variable<Self>,
+        out: &Variable<Self>,
+    ) -> fmt::Result {
+        writeln!(f, "*{} = {};", out, input)
+    }
+
+    fn compile_atomic_add(
+        f: &mut fmt::Formatter<'_>,
+        lhs: &Variable<Self>,
+        rhs: &Variable<Self>,
+        out: &Variable<Self>,
+    ) -> fmt::Result {
+        writeln!(f, "{} = *{};", out.fmt_left(), lhs)?;
+        let tmp = Variable::tmp(out.item());
+        <Add as Binary<Self>>::format(f, out, rhs, &tmp)?;
+        writeln!(f, "*{} = {};", lhs, tmp)
+    }
+
+    fn compile_atomic_max(
+        f: &mut fmt::Formatter<'_>,
+        lhs: &Variable<Self>,
+        rhs: &Variable<Self>,
+        out: &Variable<Self>,
+    ) -> fmt::Result {
+        writeln!(f, "{} = *{};", out.fmt_left(), lhs)?;
+        let tmp = Variable::tmp(out.item());
+        <Max as Binary<Self>>::format(f, out, rhs, &tmp)?;
+        writeln!(f, "*{} = {};", lhs, tmp)
+    }
+
+    fn compile_atomic_min(
+        f: &mut fmt::Formatter<'_>,
+        lhs: &Variable<Self>,
+        rhs: &Variable<Self>,
+        out: &Variable<Self>,
+    ) -> fmt::Result {
+        writeln!(f, "{} = *{};", out.fmt_left(), lhs)?;
+        let tmp = Variable::tmp(out.item());
+        <Min as Binary<Self>>::format(f, out, rhs, &tmp)?;
+        writeln!(f, "*{} = {};", lhs, tmp)
+    }
+
     fn compile_saturating_add(
         f: &mut fmt::Formatter<'_>,
         lhs: impl Display,
@@ -504,7 +595,7 @@ impl<Wmma: DialectWmmaCompiler<Self>> DialectInstructions<Self> for TtMetalDiale
     }
 
     fn compile_unreachable(f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "__builtin_unreachable()")
+        write!(f, "__builtin_unreachable();")
     }
 }
 

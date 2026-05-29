@@ -9,8 +9,9 @@ use cubecl_core::{
     MemoryConfiguration, Runtime,
     device::{DeviceId, ServerUtilitiesHandle},
     ir::{
-        DeviceProperties, HardwareProperties, MatrixLayout, MemoryDeviceProperties, MmaProperties,
-        TargetProperties, VectorSize, features::Plane,
+        BarrierLevel, DeviceProperties, ElemType, FloatKind, HardwareProperties, IntKind, MatrixLayout, MemoryDeviceProperties, MmaProperties,
+        OpaqueType, StorageType, TargetProperties, Type, UIntKind, VectorSize,
+        features::{AtomicUsage, Plane, TypeUsage},
     },
     server::ServerUtilities,
     zspace::{Shape, Strides, striding::has_pitched_row_major_strides},
@@ -82,7 +83,10 @@ pub const TILE_WIDTH: u32 = 32;
 pub const TILE_HEIGHT: u32 = 32;
 pub const TILE_ELEMENTS: u32 = TILE_WIDTH * TILE_HEIGHT;
 pub const TT_MEMORY_ALIGNMENT: u64 = 32;
-pub const TT_MAX_PAGE_SIZE_BYTES: u64 = 2 * 1024 * 1024;
+// This drives CubeCL's memory-pool sizing, not TT-Metal's 2 KiB hardware page granularity.
+// Keep it large enough for ordinary contiguous logical buffers like the 4 MiB file-backed
+// runtime test, which still allocate a single replicated MeshBuffer underneath.
+pub const TT_MAX_PAGE_SIZE_BYTES: u64 = 16 * 1024 * 1024;
 pub const TT_DEFAULT_BUFFER_PAGE_SIZE_BYTES: u64 = 2048;
 
 /// Maximum number of kernel bindings supported by TT-Metal.
@@ -116,9 +120,9 @@ impl DeviceService for TtServer {
             plane_size_max: warp_size,
             max_bindings: TT_MAX_BINDINGS,
             max_shared_memory_size: 1_500_000,
-            max_cube_count: (num_cores, 1, 1),
+            max_cube_count: (i32::MAX as u32, u16::MAX as u32, u16::MAX as u32),
             max_units_per_cube: warp_size * TILE_HEIGHT,
-            max_cube_dim: (u32::MAX, 1, 1),
+            max_cube_dim: (u32::MAX, warp_size * 32, 1),
             num_streaming_multiprocessors: Some(num_cores),
             num_tensor_cores: None,
             min_tensor_cores_dim: None,
@@ -136,9 +140,30 @@ impl DeviceService for TtServer {
         );
         register_supported_types(&mut device_props);
         register_wmma_features(Vec::new(), &mut device_props);
+        // TT does not yet inherit the full shared C++ atomic matrix honestly.
+        // Keep only the proven single-unit scalar/vector atomic slices enabled.
+        device_props.features.types.atomic.clear();
+        device_props.register_atomic_type_usage(
+            Type::new(StorageType::Atomic(ElemType::UInt(UIntKind::U32))).with_vector_size(1),
+            AtomicUsage::LoadStore | AtomicUsage::Add | AtomicUsage::MinMax,
+        );
+        device_props.register_atomic_type_usage(
+            Type::new(StorageType::Atomic(ElemType::Int(IntKind::I32))).with_vector_size(1),
+            AtomicUsage::Add | AtomicUsage::MinMax,
+        );
+        for vector_size in [1, 2, 4] {
+            device_props.register_atomic_type_usage(
+                Type::new(StorageType::Atomic(ElemType::Float(FloatKind::F32)))
+                    .with_vector_size(vector_size),
+                AtomicUsage::Add | AtomicUsage::MinMax,
+            );
+        }
+        device_props.register_type_usage(OpaqueType::Barrier(BarrierLevel::Unit), TypeUsage::Buffer);
+        device_props.register_type_usage(OpaqueType::Barrier(BarrierLevel::Cube), TypeUsage::Buffer);
         device_props.features.memory_reinterpret = true;
         device_props.features.alignment = true;
         device_props.features.plane.insert(Plane::Ops);
+        device_props.features.plane.insert(Plane::Sync);
 
         let comp_opts = CompilationOptions {
             warp_size: arch.warp_size(),

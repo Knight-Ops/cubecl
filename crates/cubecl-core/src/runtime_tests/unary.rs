@@ -251,6 +251,56 @@ macro_rules! test_unary_impl_int_fixed {
     };
 }
 
+macro_rules! unary_case_runner {
+    ($helper_name:ident, $unary_func:expr) => {
+        pub fn $helper_name<R: Runtime, F: Float + num_traits::Float + CubeElement + Display>(
+            client: ComputeClient<R>,
+            input_vectorization: usize,
+            out_vectorization: usize,
+            input: &[F],
+            expected: &[F],
+            epsilon: f32,
+        ) {
+            #[cube(launch_unchecked, fast_math = FastMath::all())]
+            fn test_function<F: Float, In: Size, Out: Size>(
+                input: &Array<Vector<F, In>>,
+                output: &mut Array<Vector<F, Out>>,
+            ) {
+                if ABSOLUTE_POS < input.len() {
+                    output[ABSOLUTE_POS] = Vector::cast_from($unary_func(input[ABSOLUTE_POS]));
+                }
+            }
+
+            let output_handle = client.empty(expected.len() * core::mem::size_of::<F>());
+            let input_handle = client.create_from_slice(F::as_bytes(input));
+
+            unsafe {
+                test_function::launch_unchecked::<F, R>(
+                    &client,
+                    CubeCount::Static(1, 1, 1),
+                    CubeDim::new_1d((input.len() / input_vectorization as usize) as u32),
+                    input_vectorization,
+                    out_vectorization,
+                    ArrayArg::from_raw_parts(input_handle, input.len()),
+                    ArrayArg::from_raw_parts(output_handle.clone(), expected.len()),
+                )
+            };
+
+            assert_equals_approx::<R, F>(&client, output_handle, expected, F::new(epsilon));
+        }
+    };
+}
+
+unary_case_runner!(run_abs_case, Vector::abs);
+unary_case_runner!(run_sqrt_case, Vector::sqrt);
+unary_case_runner!(run_inverse_sqrt_case, Vector::inverse_sqrt);
+unary_case_runner!(run_sin_case, Vector::sin);
+unary_case_runner!(run_cos_case, Vector::cos);
+unary_case_runner!(run_tan_case, Vector::tan);
+unary_case_runner!(run_tanh_case, Vector::tanh);
+unary_case_runner!(run_exp_case, Vector::exp);
+unary_case_runner!(run_log_case, Vector::ln);
+
 test_unary_impl!(test_sin, F, Vector::sin, [
     {
         input_vectorization: 1,

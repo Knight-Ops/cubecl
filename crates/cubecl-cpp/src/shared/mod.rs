@@ -14,6 +14,7 @@ mod pipeline;
 mod variable;
 mod warp;
 
+pub use barrier::*;
 pub use base::*;
 pub use body::*;
 pub use dialect::*;

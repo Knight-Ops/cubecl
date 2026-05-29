@@ -6,9 +6,12 @@ pub struct TtKernelSources {
     pub writer_source: String,
     pub num_inputs: u32,
     pub num_outputs: u32,
+    pub input_binding_indices: Vec<usize>,
+    pub output_binding_indices: Vec<usize>,
     pub num_tiles: u32,
     pub tile_size_bytes: u32,
     pub data_format_tt: u8,
+    pub unit_item_size_bytes: u32,
     pub io_layout: TtIoDataLayout,
     pub reader_compile_args: Vec<u32>,
     pub writer_compile_args: Vec<u32>,
@@ -29,6 +32,7 @@ pub enum TtBinaryComputeOp {
     Add,
     Sub,
     Mul,
+    Div,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -36,6 +40,12 @@ pub enum TtUnaryComputeOp {
     Abs,
     Sqrt,
     Rsqrt,
+    Sin,
+    Cos,
+    Tan,
+    Tanh,
+    Exp,
+    Log,
 }
 
 impl TtKernelSources {
@@ -48,6 +58,7 @@ impl TtKernelSources {
         num_tiles: u32,
         tile_size_bytes: u32,
         data_format_tt: u8,
+        unit_item_size_bytes: u32,
     ) -> Self {
         Self {
             reader_source,
@@ -55,9 +66,12 @@ impl TtKernelSources {
             writer_source,
             num_inputs,
             num_outputs,
+            input_binding_indices: Vec::new(),
+            output_binding_indices: Vec::new(),
             num_tiles,
             tile_size_bytes,
             data_format_tt,
+            unit_item_size_bytes,
             io_layout: TtIoDataLayout::Logical,
             reader_compile_args: Vec::new(),
             writer_compile_args: Vec::new(),
@@ -88,6 +102,16 @@ impl TtKernelSources {
         self
     }
 
+    pub fn with_binding_indices(
+        mut self,
+        input_binding_indices: Vec<usize>,
+        output_binding_indices: Vec<usize>,
+    ) -> Self {
+        self.input_binding_indices = input_binding_indices;
+        self.output_binding_indices = output_binding_indices;
+        self
+    }
+
     pub fn with_buffer_item_sizes(mut self, buffer_item_sizes: Vec<u32>) -> Self {
         self.buffer_item_sizes = buffer_item_sizes;
         self
@@ -108,19 +132,36 @@ impl TtKernelSources {
         self
     }
 
+    pub fn with_writer_runtime_args_prefix(mut self, prefix: &[u32]) -> Self {
+        if prefix.is_empty() {
+            return self;
+        }
+        let mut runtime_args = Vec::with_capacity(prefix.len() + self.writer_runtime_args.len());
+        runtime_args.extend_from_slice(prefix);
+        runtime_args.extend(self.writer_runtime_args);
+        self.writer_runtime_args = runtime_args;
+        self
+    }
+
     pub fn requires_tiled_io(&self) -> bool {
         matches!(self.io_layout, TtIoDataLayout::Tiled)
     }
 
+    pub fn native_scalar_size_bytes(&self) -> u32 {
+        // TT native tiles always represent 32x32 unpacked scalar elements.
+        self.tile_size_bytes / (32 * 32)
+    }
+
     /// Create sources for a simple copy kernel (1 input → 1 output).
     pub fn copy_kernel(num_tiles: u32, tile_size_bytes: u32) -> Self {
-        Self::copy_kernel_with_format(num_tiles, tile_size_bytes, 5)
+        Self::copy_kernel_with_format(num_tiles, tile_size_bytes, 5, tile_size_bytes / (32 * 32))
     }
 
     pub fn copy_kernel_with_format(
         num_tiles: u32,
         tile_size_bytes: u32,
         data_format_tt: u8,
+        unit_item_size_bytes: u32,
     ) -> Self {
         Self::new(
             super::reader::generate_reader_source(1),
@@ -131,6 +172,7 @@ impl TtKernelSources {
             num_tiles,
             tile_size_bytes,
             data_format_tt,
+            unit_item_size_bytes,
         )
         .with_io_layout(TtIoDataLayout::Tiled)
     }
@@ -140,6 +182,7 @@ impl TtKernelSources {
         num_tiles: u32,
         tile_size_bytes: u32,
         data_format_tt: u8,
+        unit_item_size_bytes: u32,
     ) -> Self {
         Self::new(
             super::reader::generate_reader_source(2),
@@ -150,25 +193,28 @@ impl TtKernelSources {
             num_tiles,
             tile_size_bytes,
             data_format_tt,
+            unit_item_size_bytes,
         )
         .with_io_layout(TtIoDataLayout::Tiled)
     }
 
     /// Create sources for an element-wise addition kernel (2 inputs → 1 output).
     pub fn add_kernel(num_tiles: u32, tile_size_bytes: u32) -> Self {
-        Self::add_kernel_with_format(num_tiles, tile_size_bytes, 5)
+        Self::add_kernel_with_format(num_tiles, tile_size_bytes, 5, tile_size_bytes / (32 * 32))
     }
 
     pub fn add_kernel_with_format(
         num_tiles: u32,
         tile_size_bytes: u32,
         data_format_tt: u8,
+        unit_item_size_bytes: u32,
     ) -> Self {
         Self::binary_kernel_with_format(
             TtBinaryComputeOp::Add,
             num_tiles,
             tile_size_bytes,
             data_format_tt,
+            unit_item_size_bytes,
         )
     }
 
@@ -176,12 +222,14 @@ impl TtKernelSources {
         num_tiles: u32,
         tile_size_bytes: u32,
         data_format_tt: u8,
+        unit_item_size_bytes: u32,
     ) -> Self {
         Self::binary_kernel_with_format(
             TtBinaryComputeOp::Sub,
             num_tiles,
             tile_size_bytes,
             data_format_tt,
+            unit_item_size_bytes,
         )
     }
 
@@ -189,12 +237,29 @@ impl TtKernelSources {
         num_tiles: u32,
         tile_size_bytes: u32,
         data_format_tt: u8,
+        unit_item_size_bytes: u32,
     ) -> Self {
         Self::binary_kernel_with_format(
             TtBinaryComputeOp::Mul,
             num_tiles,
             tile_size_bytes,
             data_format_tt,
+            unit_item_size_bytes,
+        )
+    }
+
+    pub fn div_kernel_with_format(
+        num_tiles: u32,
+        tile_size_bytes: u32,
+        data_format_tt: u8,
+        unit_item_size_bytes: u32,
+    ) -> Self {
+        Self::binary_kernel_with_format(
+            TtBinaryComputeOp::Div,
+            num_tiles,
+            tile_size_bytes,
+            data_format_tt,
+            unit_item_size_bytes,
         )
     }
 
@@ -203,6 +268,7 @@ impl TtKernelSources {
         num_tiles: u32,
         tile_size_bytes: u32,
         data_format_tt: u8,
+        unit_item_size_bytes: u32,
     ) -> Self {
         Self::new(
             super::reader::generate_reader_source(1),
@@ -213,6 +279,7 @@ impl TtKernelSources {
             num_tiles,
             tile_size_bytes,
             data_format_tt,
+            unit_item_size_bytes,
         )
         .with_io_layout(TtIoDataLayout::Tiled)
     }
@@ -221,12 +288,14 @@ impl TtKernelSources {
         num_tiles: u32,
         tile_size_bytes: u32,
         data_format_tt: u8,
+        unit_item_size_bytes: u32,
     ) -> Self {
         Self::unary_kernel_with_format(
             TtUnaryComputeOp::Abs,
             num_tiles,
             tile_size_bytes,
             data_format_tt,
+            unit_item_size_bytes,
         )
     }
 
@@ -234,12 +303,14 @@ impl TtKernelSources {
         num_tiles: u32,
         tile_size_bytes: u32,
         data_format_tt: u8,
+        unit_item_size_bytes: u32,
     ) -> Self {
         Self::unary_kernel_with_format(
             TtUnaryComputeOp::Sqrt,
             num_tiles,
             tile_size_bytes,
             data_format_tt,
+            unit_item_size_bytes,
         )
     }
 
@@ -247,12 +318,44 @@ impl TtKernelSources {
         num_tiles: u32,
         tile_size_bytes: u32,
         data_format_tt: u8,
+        unit_item_size_bytes: u32,
     ) -> Self {
         Self::unary_kernel_with_format(
             TtUnaryComputeOp::Rsqrt,
             num_tiles,
             tile_size_bytes,
             data_format_tt,
+            unit_item_size_bytes,
+        )
+    }
+
+    pub fn exp_kernel_with_format(
+        num_tiles: u32,
+        tile_size_bytes: u32,
+        data_format_tt: u8,
+        unit_item_size_bytes: u32,
+    ) -> Self {
+        Self::unary_kernel_with_format(
+            TtUnaryComputeOp::Exp,
+            num_tiles,
+            tile_size_bytes,
+            data_format_tt,
+            unit_item_size_bytes,
+        )
+    }
+
+    pub fn log_kernel_with_format(
+        num_tiles: u32,
+        tile_size_bytes: u32,
+        data_format_tt: u8,
+        unit_item_size_bytes: u32,
+    ) -> Self {
+        Self::unary_kernel_with_format(
+            TtUnaryComputeOp::Log,
+            num_tiles,
+            tile_size_bytes,
+            data_format_tt,
+            unit_item_size_bytes,
         )
     }
 }

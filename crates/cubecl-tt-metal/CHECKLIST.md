@@ -19,7 +19,7 @@ Tasks:
 - [x] Keep the full `cubecl_std` + `cubecl_core` matrix in `PHASES.md`.
 - [x] Mirror the matrix in the TT harness comment in `crates/cubecl-tt-metal/src/lib.rs`.
 - [x] Use `cargo test -p cubecl-tt-metal -- --list` as the inventory check for wrapper changes.
-- [ ] Update the matrix immediately when a category moves between enabled, queued, or parity-lane states.
+- [x] Update the matrix immediately when a category moves between enabled, queued, or parity-lane states.
 
 
 ## Phase 0: Maintain Baseline
@@ -94,7 +94,8 @@ Launch/runtime tasks:
 
 Safety tasks:
 - [x] Remove any remaining crash path caused by client panics after TT launch failure.
-- [ ] Remove any remaining TT teardown abort caused by ordinary test failures.
+- [x] Remove any remaining TT teardown abort caused by ordinary test failures.
+- [x] Isolate and eliminate the TT UMD/TLB allocation abort reproduced by `compile_kernel_surfaces_bad_cpp_as_launch_error` in the full hardware lane.
 - [x] Keep unsupported runtime patterns descriptive and deterministic.
 
 Verification:
@@ -115,8 +116,8 @@ Recommended order:
 - [x] `trigonometry`
 - [x] `reinterpret_slice`
 - [x] `event`
-- [ ] `tensor_identity` after TT supports the upstream 2D cube-dimension launch shape
-- [ ] `quantized_view` after end-to-end quantized-value, scale, and metadata validation
+- [x] enable the current TT-local seeded `tensor_identity` wrapper; upstream 2D launch/modulo parity still remains separate backend follow-up
+- [x] enable the current TT-local `quantized_view` wrappers after validating the per-tensor int/fp4 decode path end to end on TT; broader parity remains separate follow-up
 
 Per-suite workflow:
 - [x] Unignore exactly one std suite.
@@ -169,14 +170,17 @@ Runtime test category order:
 - [x] add TT-local `launch_untyped` dynamic-addressing coverage
 - [x] add TT-local helper-call `debug` coverage and opportunistic `to_client` coverage
 - [x] add TT-local wrappers for `const_match`, `enums`, and `file`
-- [x] add a non-loop TT-local `slice` subset (`select`, `len`, `mut_assign`, `mut_len`)
+- [x] add TT-local `slice` coverage, including the range-loop `slice_for` case
+- [x] add TT-local `sequence` coverage (`for_loop`, `index`)
+- [x] add TT-local `branch` switch coverage on top of the existing `select` subset
+- [x] add TT-local `unroll` coverage (`add`, `load_store`)
 - [x] add a narrow TT-local `saturating` subset (`i32`/`u32`)
 - [x] add feature-gated TT-local `minifloat` wrappers
-- [x] add TT-local `binary_untyped::mulhi` and the non-loop/non-shared-memory `vector` subset
+- [x] add TT-local `binary_untyped::mulhi` and the current `vector` subset, including the single-unit scratch/shared-layout `test_shared_memory` case
 - [x] add the TT-local unary-int subset (`abs`, `vector_sum`, and bit operations)
-- [ ] then evaluate queued value-semantics families (`topology`) and the broader float `binary`/`unary` surfaces
-  direct TT-native `sub`/`mul`/`sqrt` characterization is now in place, but wrapper promotion is blocked on the row-major/logical-buffer to tile-layout bridge
-- [ ] only then evaluate broader switch/loop branches, `slice_for`, vector loop/unroll/shared-memory cases, and synchronization/plane categories
+- [ ] then widen the newly enabled TT-local `topology` / `tensor` slice beyond the current linearized and 2D single-cube-count coverage, and continue the broader float/vector native surfaces
+  scalar plus vectorized-2/vectorized-4/vectorized-8/vectorized-16 logical-BF16/F32 native `add`/`sub`/`mul`/`div` and `abs`/`sqrt`/`inverse_sqrt`/`sin`/`cos`/`tan`/`tanh`/`exp`/`log` wrapper coverage is now green on hardware; the full current upstream `barrier` runtime suite is now green on hardware through the proven generic-writer shared-scratch subset; the full current direct TT-native block-float unary/binary op surface for `Bfp8_b` and `Bfp4_b` is green on hardware through the host/tile bridge; TT-local logical-`f32` wrapper suites over that native block-float surface are now green too; the current non-1D launch slice is now green for full upstream absolute-position coverage, 3D cube-count decomposition, 2D topology decomposition, and `tensor_coordinate`; the full current upstream plane suite is now green through generic TT warp lowering including `elect`; and `index::test_kernel_shuffle` is now green through the local-array TT generic-writer path, while wider vector shapes beyond vec16, true upstream wrapper promotion, `Bfp2_b`, the current single-device cross-stream hang, and broader multi-device collective / subgroup synchronization semantics still need more work
+- [ ] only then evaluate broader shared-memory/vector semantics and the remaining plane/subgroup-dependent synchronization categories beyond the now-green cube-and-plane visibility subset
 
 Execution tasks:
 - [x] Enable the chosen `cubecl_core` wrappers in `crates/cubecl-tt-metal/src/lib.rs`.
@@ -193,6 +197,34 @@ Verification:
 
 Stop/go gate:
 - [x] Do not claim broad CubeCL compatibility until an explicit core subset is green on hardware.
+
+## Remaining Parity Workstreams
+
+Status goal:
+Turn the remaining parity gaps into explicit implementation tracks instead of one-off blockers.
+
+Tasks:
+- [x] Topology: characterize and fix `CUBE_POS_X` / axis-component semantics before widening beyond `absolute_pos_linearized`.
+- [x] Shared-memory: build the smallest honest single-unit scratch/shared-layout slice and use it to make `vector::test_shared_memory` green on hardware.
+- [x] Shared-memory/barrier: keep the current upstream barrier runtime suite green through the proven generic-writer shared-scratch subset.
+- [x] Block-float: keep direct `Bfp8_b`/`Bfp4_b` copy/storage suites and the full current direct TT-native unary/binary op surface green while landing TT-local logical-`f32` wrapper-suite promotion.
+- [x] Block-float: model the device semantic with focused regressions before landing TT-local logical-`f32` wrapper suites.
+- [ ] Block-float: treat true upstream wrapper promotion as a separate follow-on task until the CubeCL `e4m3`/`e2m1x2` vs TT block-float type-model gap is resolved.
+- [x] Vectorization: widen BF16/F32 native wrappers through `vec16` with explicit hardware validation.
+- [x] Atomics: make TT capability reporting honest, then bring up the smallest scalar `u32` load/store slice.
+- [x] Atomics: keep the proven single-unit `Atomic<u32>` load/store slice green, then widen to scalar `u32` add with explicit hardware validation.
+- [x] Atomics: complete the full current upstream generated atomic suite with explicit TT hardware validation (`Atomic<u32>` load/store/add, scalar `Atomic<i32>` min/max, scalar/vectorized-2/vectorized-4 `Atomic<f32>` add/min/max).
+- [ ] Atomics: only widen beyond the current generated suite after explicit hardware validation of each new op/type/vector family and a truthful capability contract for it.
+- [x] Non-1D launch: characterize the first honest TT 2D single-cube-count launch/topology semantics and use it to make `tensor_coordinate` green on hardware.
+- [ ] Non-1D launch: widen beyond the current decomposition model before claiming broader tensor/shared-state parity.
+- [x] Plane: keep the full current upstream plane suite green on hardware through the TT generic upstream warp-lowering path (`vec1`/`vec2`/`vec4` reductions, broadcasts, shuffles, and `elect`, plus `vec1` `all`/`any`/`ballot`), and keep TT-local `vec1` `elect` as a focused regression.
+- [ ] Plane/sync/collectives: keep the current synchronization subset green, including the now-proven `sync_plane` visibility case, the now-green generic upstream warp-lowering path, and the single-device identity `all_reduce` path, and treat true multi-device collective validation as the remaining dedicated semantic workstream rather than incidental follow-up from ordinary runtime tests.
+- [ ] Tensormap/stream/cluster/cmma: leave in parity lane until their underlying TT runtime/compiler capability exists.
+- [ ] Burn: convert the current CubeCL subset into a tiny downstream Burn smoke before re-prioritizing later backend work.
+
+Verification:
+- [ ] Each workstream has focused TT regressions before any generated category is promoted.
+- [ ] `PHASES.md`, the TT harness summary, and `cargo test -p cubecl-tt-metal -- --list` stay aligned after each promotion.
 
 ## Phase 5: Burn Downstream Smoke Validation
 
@@ -278,6 +310,7 @@ Build:
 
 TT backend tests:
 - [x] `cargo test -p cubecl-tt-metal -- --test-threads=1`
+- [x] `TT_METAL_RUN_HARDWARE_TESTS=1 LD_LIBRARY_PATH=/usr/local/lib cargo test -p cubecl-tt-metal -- --test-threads=1`
 - [x] `cargo test -p cubecl-tt-metal -- --list`
 
 Focused TT test loops:
@@ -286,3 +319,5 @@ Focused TT test loops:
 When re-enabling generated suites:
 - [ ] run only the single suite being worked on
 - [ ] get it green in isolation before broadening the matrix
+
+- [ ] Shared-memory/barrier: only widen beyond the current barrier memcpy/lifecycle subset after broader shared storage and barrier/pipeline semantics both exist on hardware.

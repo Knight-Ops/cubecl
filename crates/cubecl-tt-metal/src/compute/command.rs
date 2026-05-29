@@ -1,5 +1,5 @@
 use crate::compute::{
-    context::TtContext,
+    context::{PreparedLaunch, TtContext},
     storage::gpu::{TtBufferLayout, TtResource},
     stream::TtStreamBackend,
 };
@@ -11,6 +11,7 @@ use cubecl_core::server::{
 };
 use cubecl_core::zspace::striding::has_pitched_row_major_strides;
 use cubecl_runtime::compiler::CubeTask;
+use cubecl_runtime::server::CubeCount;
 use cubecl_runtime::logging::ServerLogger;
 use cubecl_runtime::memory_management::ManagedMemoryHandle;
 use cubecl_runtime::stream::ResolvedStreams;
@@ -21,6 +22,30 @@ use cubecl_cpp::tt_metal::TtKernelSources;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TtLaunchTarget {
     FullMesh,
+}
+
+#[derive(Debug)]
+struct TtTiledTempBuffer {
+    mesh_buffer: libtt_metal_cxx::MeshBuffer,
+    address: u32,
+    compile_args: Vec<u32>,
+}
+
+#[derive(Debug)]
+struct TtTiledOutputBridge {
+    temp: TtTiledTempBuffer,
+    original: TtResource,
+    logical_size_bytes: usize,
+}
+
+#[derive(Debug)]
+struct TtTiledLaunchBridge {
+    row_major_rows: u32,
+    row_major_cols: u32,
+    logical_elem_size_bytes: u32,
+    data_format_tt: u8,
+    _inputs: Vec<TtTiledTempBuffer>,
+    outputs: Vec<TtTiledOutputBridge>,
 }
 
 pub(crate) struct Command<'a> {
@@ -73,6 +98,298 @@ impl<'a> Command<'a> {
             .get_resource(binding.memory, binding.offset_start, binding.offset_end)
     }
 
+    pub(crate) fn read_resource_bytes(
+        &mut self,
+        resource: &TtResource,
+        num_bytes: usize,
+    ) -> Result<Vec<u8>, IoError> {
+        if resource.layout != TtBufferLayout::Replicated {
+            return Err(IoError::Unknown {
+                backtrace: BackTrace::capture(),
+                description: "read_resource_bytes only supports replicated TT buffers today"
+                    .into(),
+            });
+        }
+        if num_bytes as u64 > resource.size {
+            return Err(IoError::Unknown {
+                backtrace: BackTrace::capture(),
+                description: format!(
+                    "read_resource_bytes: logical read {} exceeds resource size {}",
+                    num_bytes, resource.size
+                ),
+            });
+        }
+
+        let stream = self.streams.current();
+        let storage = &mut stream.memory_management_gpu;
+        let mesh_buffer = storage.storage().get_mesh_buffer(resource.storage_id);
+        let mut staged = vec![0u8; resource.allocation_size as usize];
+        mesh_read_buffer(self.mesh, mesh_buffer, &mut staged, "read_mesh_buffer failed")?;
+
+        let start = resource.allocation_offset as usize;
+        let end = start + num_bytes;
+        Ok(staged[start..end].to_vec())
+    }
+
+    pub(crate) fn write_resource_bytes(
+        &mut self,
+        resource: &TtResource,
+        bytes: &[u8],
+    ) -> Result<(), IoError> {
+        if resource.layout != TtBufferLayout::Replicated {
+            return Err(IoError::Unknown {
+                backtrace: BackTrace::capture(),
+                description: "write_resource_bytes only supports replicated TT buffers today"
+                    .into(),
+            });
+        }
+        if bytes.len() as u64 > resource.size {
+            return Err(IoError::Unknown {
+                backtrace: BackTrace::capture(),
+                description: format!(
+                    "write_resource_bytes: logical write {} exceeds resource size {}",
+                    bytes.len(), resource.size
+                ),
+            });
+        }
+
+        let stream = self.streams.current();
+        let storage = &mut stream.memory_management_gpu;
+        let mesh_buffer = storage.storage().get_mesh_buffer(resource.storage_id);
+
+        let mut staged = vec![0u8; resource.allocation_size as usize];
+        let start = resource.allocation_offset as usize;
+        let end = start + bytes.len();
+
+        if resource.allocation_offset != 0 || bytes.len() as u64 != resource.allocation_size {
+            mesh_read_buffer(
+                self.mesh,
+                mesh_buffer,
+                &mut staged,
+                "read_mesh_buffer before partial write failed",
+            )?;
+        }
+
+        staged[start..end].copy_from_slice(bytes);
+        mesh_write_buffer(self.mesh, mesh_buffer, &staged, "write_mesh_buffer failed")
+    }
+
+    fn create_temp_tiled_buffer(
+        &self,
+        staged: &[u8],
+        page_size: u64,
+    ) -> Result<TtTiledTempBuffer, LaunchError> {
+        let mesh_buffer = catch_launch_panic("temporary MeshBuffer allocation failed", || {
+            libtt_metal_cxx::MeshBuffer::create_replicated(
+                self.mesh,
+                staged.len() as u64,
+                page_size,
+                0,
+            )
+        })?;
+        let compile_args = mesh_buffer
+            .compile_args()
+            .map_err(map_tt_exception_to_launch("temporary MeshBuffer compile args failed"))?;
+        let address = u32::try_from(mesh_buffer.address()).map_err(|_| LaunchError::Unknown {
+            reason: "temporary MeshBuffer address exceeds 32-bit DRAM address space".into(),
+            backtrace: BackTrace::capture(),
+        })?;
+        if !staged.is_empty() {
+            let write_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                self.mesh.write_mesh_buffer(&mesh_buffer, staged)
+            }));
+            match write_result {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => {
+                    return Err(LaunchError::Unknown {
+                        reason: format!("temporary MeshBuffer write failed: {}", e.what()),
+                        backtrace: BackTrace::capture(),
+                    });
+                }
+                Err(_) => {
+                    return Err(LaunchError::Unknown {
+                        reason: "temporary MeshBuffer write panicked".into(),
+                        backtrace: BackTrace::capture(),
+                    });
+                }
+            }
+        }
+        Ok(TtTiledTempBuffer {
+            mesh_buffer,
+            address,
+            compile_args,
+        })
+    }
+
+    fn bridge_prepared_launch(
+        &mut self,
+        prepared: PreparedLaunch,
+        resources: &[TtResource],
+    ) -> Result<(PreparedLaunch, Option<TtTiledLaunchBridge>), LaunchError> {
+        if !prepared.sources.requires_tiled_io() {
+            return Ok((prepared, None));
+        }
+        if resources.len() != prepared.bindings.len() {
+            return Err(LaunchError::Unknown {
+                reason: format!(
+                    "TT tiled I/O bridge expected {} resources but got {}",
+                    prepared.bindings.len(),
+                    resources.len()
+                ),
+                backtrace: BackTrace::capture(),
+            });
+        }
+
+        let num_tiles = prepared.sources.num_tiles.max(1);
+        let row_major_rows = 32u32;
+        let row_major_cols = num_tiles * 32;
+        let logical_elem_size_bytes = logical_host_elem_size_bytes(
+            prepared.sources.data_format_tt,
+            prepared.sources.native_scalar_size_bytes(),
+        );
+        if logical_elem_size_bytes == 0 {
+            return Err(LaunchError::Unknown {
+                reason: "TT tiled I/O bridge computed a zero scalar element width".into(),
+                backtrace: BackTrace::capture(),
+            });
+        }
+        let logical_padded_bytes =
+            row_major_rows as usize * row_major_cols as usize * logical_elem_size_bytes as usize;
+
+        let mut input_addrs = Vec::new();
+        let mut output_addrs = Vec::new();
+        let mut reader_compile_args = Vec::new();
+        let mut writer_compile_args = Vec::new();
+        let mut temp_inputs = Vec::new();
+        let mut temp_outputs = Vec::new();
+
+        for (binding, resource) in prepared.bindings.iter().zip(resources.iter()) {
+            match binding.visibility {
+                cubecl_runtime::kernel::Visibility::Read => {
+                    let logical = self
+                        .read_resource_bytes(resource, binding.logical_size_bytes as usize)
+                        .map_err(map_io_err_to_launch("TT tiled input bridge read failed"))?;
+                    let mut padded = vec![0u8; logical_padded_bytes];
+                    padded[..logical.len()].copy_from_slice(&logical);
+                    let tilized = if is_native_block_float_format(prepared.sources.data_format_tt) {
+                        libtt_metal_cxx::tilize_with_data_format(
+                            &padded,
+                            row_major_rows,
+                            row_major_cols,
+                            prepared.sources.data_format_tt,
+                        )
+                    } else {
+                        libtt_metal_cxx::tilize(
+                            &padded,
+                            row_major_rows,
+                            row_major_cols,
+                            logical_elem_size_bytes,
+                        )
+                    }
+                    .map_err(map_tt_exception_to_launch("TT tiled input tilize failed"))?;
+                    let temp = self.create_temp_tiled_buffer(
+                        &tilized,
+                        u64::from(prepared.sources.tile_size_bytes),
+                    )?;
+                    input_addrs.push(temp.address);
+                    reader_compile_args.extend(temp.compile_args.iter().copied());
+                    temp_inputs.push(temp);
+                }
+                cubecl_runtime::kernel::Visibility::ReadWrite => {
+                    let temp = self.create_temp_tiled_buffer(
+                        &vec![0u8; num_tiles as usize * prepared.sources.tile_size_bytes as usize],
+                        u64::from(prepared.sources.tile_size_bytes),
+                    )?;
+                    output_addrs.push(temp.address);
+                    writer_compile_args.extend(temp.compile_args.iter().copied());
+                    temp_outputs.push(TtTiledOutputBridge {
+                        temp,
+                        original: resource.clone(),
+                        logical_size_bytes: binding.logical_size_bytes as usize,
+                    });
+                }
+            }
+        }
+
+        let adapted = PreparedLaunch {
+            sources: prepared
+                .sources
+                .clone()
+                .with_compile_args(reader_compile_args, writer_compile_args),
+            input_addrs,
+            output_addrs,
+            bindings: prepared.bindings,
+        };
+        let bridge = TtTiledLaunchBridge {
+            row_major_rows,
+            row_major_cols,
+            logical_elem_size_bytes,
+            data_format_tt: prepared.sources.data_format_tt,
+            _inputs: temp_inputs,
+            outputs: temp_outputs,
+        };
+        Ok((adapted, Some(bridge)))
+    }
+
+    fn finish_tiled_launch_bridge(
+        &mut self,
+        bridge: TtTiledLaunchBridge,
+    ) -> Result<(), LaunchError> {
+        for output in bridge.outputs {
+            let mut staged = vec![0u8; output.temp.mesh_buffer.size() as usize];
+            let read_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                self.mesh.read_mesh_buffer(&output.temp.mesh_buffer, &mut staged)
+            }));
+            match read_result {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => {
+                    return Err(LaunchError::Unknown {
+                        reason: format!("TT tiled output read failed: {}", e.what()),
+                        backtrace: BackTrace::capture(),
+                    });
+                }
+                Err(_) => {
+                    return Err(LaunchError::Unknown {
+                        reason: "TT tiled output read panicked".into(),
+                        backtrace: BackTrace::capture(),
+                    });
+                }
+            }
+
+            let untilized = if is_native_block_float_format(bridge.data_format_tt) {
+                libtt_metal_cxx::untilize_with_data_format(
+                    &staged,
+                    bridge.row_major_rows,
+                    bridge.row_major_cols,
+                    bridge.data_format_tt,
+                )
+            } else {
+                libtt_metal_cxx::untilize(
+                    &staged,
+                    bridge.row_major_rows,
+                    bridge.row_major_cols,
+                    bridge.logical_elem_size_bytes,
+                )
+            }
+            .map_err(map_tt_exception_to_launch("TT tiled output untilize failed"))?;
+            if untilized.len() < output.logical_size_bytes {
+                return Err(LaunchError::Unknown {
+                    reason: format!(
+                        "TT tiled output bridge produced {} bytes, expected at least {}",
+                        untilized.len(),
+                        output.logical_size_bytes
+                    ),
+                    backtrace: BackTrace::capture(),
+                });
+            }
+            self.write_resource_bytes(&output.original, &untilized[..output.logical_size_bytes])
+                .map_err(map_io_err_to_launch(
+                    "TT tiled output write-back to logical buffer failed",
+                ))?;
+        }
+        Ok(())
+    }
+
     /// Write host data to a device buffer (blocking).
     pub fn write_to_gpu(&mut self, descriptor: CopyDescriptor, data: Bytes) -> Result<(), IoError> {
         println!("[write_to_gpu] enter");
@@ -83,9 +400,6 @@ impl<'a> Command<'a> {
                 description: "write_to_gpu only supports replicated TT buffers today".into(),
             });
         }
-        let stream = self.streams.current();
-        let storage = &mut stream.memory_management_gpu;
-        let mesh_buffer = storage.storage().get_mesh_buffer(resource.storage_id);
 
         if !has_pitched_row_major_strides(&descriptor.shape, &descriptor.strides) {
             return Err(IoError::UnsupportedStrides {
@@ -94,15 +408,6 @@ impl<'a> Command<'a> {
         }
 
         let num_bytes: usize = descriptor.shape.iter().product::<usize>() * descriptor.elem_size;
-        if num_bytes as u64 > resource.size {
-            return Err(IoError::Unknown {
-                backtrace: BackTrace::capture(),
-                description: format!(
-                    "write_to_gpu: logical write {} exceeds resource size {}",
-                    num_bytes, resource.size
-                ),
-            });
-        }
         if data.len() < num_bytes {
             return Err(IoError::Unknown {
                 backtrace: BackTrace::capture(),
@@ -114,58 +419,11 @@ impl<'a> Command<'a> {
             });
         }
 
-        let mut staged = vec![0u8; resource.allocation_size as usize];
-        let start = resource.allocation_offset as usize;
-        let end = start + num_bytes;
-
-        if resource.allocation_offset != 0 || num_bytes as u64 != resource.allocation_size {
-            let read_existing = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                self.mesh.read_mesh_buffer(mesh_buffer, &mut staged)
-            }));
-            match read_existing {
-                Ok(Ok(())) => {}
-                Ok(Err(e)) => {
-                    return Err(IoError::Unknown {
-                        backtrace: BackTrace::capture(),
-                        description: format!("read_mesh_buffer before partial write failed: {}", e.what()),
-                    });
-                }
-                Err(_panic) => {
-                    return Err(IoError::Unknown {
-                        backtrace: BackTrace::capture(),
-                        description: "read_mesh_buffer before partial write panicked".into(),
-                    });
-                }
-            }
-        }
-
-        staged[start..end].copy_from_slice(&data[..num_bytes]);
-
         println!(
-            "[write_to_gpu] calling write_mesh_buffer {} bytes ({} staged)",
+            "[write_to_gpu] calling write_mesh_buffer {} bytes",
             num_bytes,
-            staged.len()
         );
-        let write_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            self.mesh.write_mesh_buffer(mesh_buffer, &staged)
-        }));
-        match write_result {
-            Ok(Ok(())) => println!("[write_to_gpu] write_mesh_buffer ok"),
-            Ok(Err(e)) => {
-                println!("[write_to_gpu] write_mesh_buffer CXX error: {}", e.what());
-                return Err(IoError::Unknown {
-                    backtrace: BackTrace::capture(),
-                    description: format!("write_mesh_buffer failed: {}", e.what()),
-                });
-            }
-            Err(_panic) => {
-                println!("[write_to_gpu] write_mesh_buffer PANICKED");
-                return Err(IoError::Unknown {
-                    backtrace: BackTrace::capture(),
-                    description: "write_mesh_buffer panicked".into(),
-                });
-            }
-        }
+        self.write_resource_bytes(&resource, &data[..num_bytes])?;
         println!("[write_to_gpu] done");
         Ok(())
     }
@@ -179,44 +437,9 @@ impl<'a> Command<'a> {
                 description: "write_to_cpu only supports replicated TT buffers today".into(),
             });
         }
-        let stream = self.streams.current();
-        let storage = &mut stream.memory_management_gpu;
-        let mesh_buffer = storage.storage().get_mesh_buffer(resource.storage_id);
 
         let num_bytes: usize = descriptor.shape.iter().product::<usize>() * descriptor.elem_size;
-        if num_bytes as u64 > resource.size {
-            return Err(IoError::Unknown {
-                backtrace: BackTrace::capture(),
-                description: format!(
-                    "write_to_cpu: logical read {} exceeds resource size {}",
-                    num_bytes, resource.size
-                ),
-            });
-        }
-        let mut staged = vec![0u8; resource.allocation_size as usize];
-
-        let read_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            self.mesh.read_mesh_buffer(mesh_buffer, &mut staged)
-        }));
-        match read_result {
-            Ok(Ok(())) => {}
-            Ok(Err(e)) => {
-                return Err(IoError::Unknown {
-                    backtrace: BackTrace::capture(),
-                    description: format!("read_mesh_buffer failed: {}", e.what()),
-                });
-            }
-            Err(_panic) => {
-                return Err(IoError::Unknown {
-                    backtrace: BackTrace::capture(),
-                    description: "read_mesh_buffer panicked".into(),
-                });
-            }
-        }
-
-        let start = resource.allocation_offset as usize;
-        let end = start + num_bytes;
-        Ok(Bytes::from_bytes_vec(staged[start..end].to_vec()))
+        Ok(Bytes::from_bytes_vec(self.read_resource_bytes(&resource, num_bytes)?))
     }
 
     fn launch_target_for_resources(
@@ -276,22 +499,28 @@ impl<'a> Command<'a> {
     pub fn kernel_cube(
         &mut self,
         cube_kernel: Box<dyn CubeTask<TtCompiler>>,
+        count: CubeCount,
         mode: ExecutionMode,
         resources: &[TtResource],
         info: &cubecl_runtime::server::MetadataBindingInfo,
         logger: Arc<ServerLogger>,
     ) -> Result<(), LaunchError> {
         let _ = println!(
-            "[kernel_cube] enter
-"
+            "[kernel_cube] enter\n"
         );
-        let compiled = self
+        let prepared = self
             .ctx
-            .compile_cube_task(cube_kernel, mode, resources, info, logger)?;
+            .prepare_cube_task_launch(cube_kernel, mode, count, resources, info)?;
+        let (prepared, bridge) = self.bridge_prepared_launch(prepared, resources)?;
+        let compiled = self.ctx.compile_kernel(
+            &prepared.sources,
+            &prepared.input_addrs,
+            &prepared.output_addrs,
+            logger,
+        )?;
         let target = self.launch_target_for_resources(resources)?;
         let _ = println!(
-            "[kernel_cube] compile done
-"
+            "[kernel_cube] compile done\n"
         );
 
         let mut workload = libtt_metal_cxx::MeshWorkload::new();
@@ -299,11 +528,68 @@ impl<'a> Command<'a> {
         catch_launch_panic("enqueue_workload failed", || {
             self.mesh.enqueue_workload(&mut workload, true)
         })?;
+        if let Some(bridge) = bridge {
+            self.finish_tiled_launch_bridge(bridge)?;
+        }
         let _ = println!(
-            "[kernel_cube] exit
-"
+            "[kernel_cube] exit\n"
         );
         Ok(())
+    }
+}
+
+fn mesh_write_buffer(
+    mesh: &libtt_metal_cxx::MeshDevice,
+    mesh_buffer: &libtt_metal_cxx::MeshBuffer,
+    staged: &[u8],
+    context: &'static str,
+) -> Result<(), IoError> {
+    let write_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        mesh.write_mesh_buffer(mesh_buffer, staged)
+    }));
+    match write_result {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(e)) => Err(IoError::Unknown {
+            backtrace: BackTrace::capture(),
+            description: format!("{context}: {}", e.what()),
+        }),
+        Err(_panic) => Err(IoError::Unknown {
+            backtrace: BackTrace::capture(),
+            description: format!("{context}: TT-Metal host call panicked"),
+        }),
+    }
+}
+
+fn mesh_read_buffer(
+    mesh: &libtt_metal_cxx::MeshDevice,
+    mesh_buffer: &libtt_metal_cxx::MeshBuffer,
+    staged: &mut [u8],
+    context: &'static str,
+) -> Result<(), IoError> {
+    let read_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        mesh.read_mesh_buffer(mesh_buffer, staged)
+    }));
+    match read_result {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(e)) => Err(IoError::Unknown {
+            backtrace: BackTrace::capture(),
+            description: format!("{context}: {}", e.what()),
+        }),
+        Err(_panic) => Err(IoError::Unknown {
+            backtrace: BackTrace::capture(),
+            description: format!("{context}: TT-Metal host call panicked"),
+        }),
+    }
+}
+
+fn is_native_block_float_format(data_format_tt: u8) -> bool {
+    matches!(data_format_tt, 6 | 7 | 15)
+}
+
+fn logical_host_elem_size_bytes(data_format_tt: u8, native_scalar_size_bytes: u32) -> u32 {
+    match data_format_tt {
+        6 | 7 | 15 => 4,
+        _ => native_scalar_size_bytes,
     }
 }
 
@@ -321,5 +607,23 @@ fn catch_launch_panic<T>(
             reason: format!("{context}: TT-Metal host call panicked"),
             backtrace: BackTrace::capture(),
         }),
+    }
+}
+
+fn map_io_err_to_launch(
+    context: &'static str,
+) -> impl FnOnce(IoError) -> LaunchError {
+    move |err| LaunchError::Unknown {
+        reason: format!("{context}: {err:?}"),
+        backtrace: BackTrace::capture(),
+    }
+}
+
+fn map_tt_exception_to_launch(
+    context: &'static str,
+) -> impl FnOnce(libtt_metal_cxx::Exception) -> LaunchError {
+    move |err| LaunchError::Unknown {
+        reason: format!("{context}: {}", err.what()),
+        backtrace: BackTrace::capture(),
     }
 }

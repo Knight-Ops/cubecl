@@ -12,7 +12,7 @@ use cubecl_common::stream_id::StreamId;
 use cubecl_core::{
     MemoryConfiguration,
     backtrace::BackTrace,
-    ir::MemoryDeviceProperties,
+    ir::{BarrierLevel, MemoryDeviceProperties, OpaqueType, features::TypeUsage},
     prelude::*,
     server::{
         Binding, CopyDescriptor, ExecutionMode, KernelArguments, ProfileError, ProfilingToken,
@@ -267,6 +267,93 @@ impl ComputeServer for TtServer {
 
 impl ServerCommunication for TtServer {
     const SERVER_COMM_ENABLED: bool = false;
+
+    fn sync_collective(&mut self, stream_id: StreamId) -> Result<(), ServerError> {
+        self.flush_stream_errors(
+            stream_id,
+            StreamErrorMode {
+                ignore: false,
+                flush: true,
+            },
+        )
+    }
+
+    fn comm_init(&mut self, device_ids: Vec<cubecl_common::device::DeviceId>) -> Result<(), ServerError> {
+        if device_ids.len() <= 1 {
+            return Ok(());
+        }
+
+        Err(ServerError::Generic {
+            reason: format!(
+                "TT-Metal collective communication currently only supports single-device identity all_reduce; requested {} devices",
+                device_ids.len()
+            ),
+            backtrace: BackTrace::capture(),
+        })
+    }
+
+    fn all_reduce(
+        &mut self,
+        src: Binding,
+        dst: Binding,
+        _dtype: cubecl_core::ir::ElemType,
+        stream_id: StreamId,
+        _op: cubecl_runtime::server::ReduceOperation,
+        device_ids: Vec<cubecl_common::device::DeviceId>,
+    ) -> Result<(), ServerError> {
+        if device_ids.len() > 1 {
+            return Err(ServerError::Generic {
+                reason: format!(
+                    "TT-Metal all_reduce currently only supports single-device identity semantics; requested {} devices",
+                    device_ids.len()
+                ),
+                backtrace: BackTrace::capture(),
+            });
+        }
+
+        let mut command = self.command(
+            stream_id,
+            [&src, &dst].into_iter(),
+            StreamErrorMode {
+                ignore: false,
+                flush: false,
+            },
+        )?;
+
+        let src_resource = command.resource(src.clone()).map_err(|e| ServerError::Generic {
+            reason: format!("all_reduce source resource: {e:?}"),
+            backtrace: BackTrace::capture(),
+        })?;
+        let dst_resource = command.resource(dst.clone()).map_err(|e| ServerError::Generic {
+            reason: format!("all_reduce destination resource: {e:?}"),
+            backtrace: BackTrace::capture(),
+        })?;
+
+        let logical_size = src.size_in_used() as usize;
+        if dst.size_in_used() < src.size_in_used() {
+            return Err(ServerError::Generic {
+                reason: format!(
+                    "TT-Metal single-device all_reduce requires destination size {} >= source size {}",
+                    dst.size_in_used(),
+                    src.size_in_used()
+                ),
+                backtrace: BackTrace::capture(),
+            });
+        }
+
+        let bytes = command
+            .read_resource_bytes(&src_resource, logical_size)
+            .map_err(|e| ServerError::Generic {
+                reason: format!("single-device all_reduce read failed: {e:?}"),
+                backtrace: BackTrace::capture(),
+            })?;
+        command
+            .write_resource_bytes(&dst_resource, &bytes)
+            .map_err(|e| ServerError::Generic {
+                reason: format!("single-device all_reduce write failed: {e:?}"),
+                backtrace: BackTrace::capture(),
+            })
+    }
 }
 
 impl TtServer {
@@ -292,9 +379,9 @@ impl TtServer {
             plane_size_max: warp_size,
             max_bindings: 16,
             max_shared_memory_size: 1_500_000,
-            max_cube_count: (1, 1, 1),
+            max_cube_count: (i32::MAX as u32, u16::MAX as u32, u16::MAX as u32),
             max_units_per_cube: warp_size * 32,
-            max_cube_dim: (u32::MAX, 1, 1),
+            max_cube_dim: (u32::MAX, warp_size * 32, 1),
             num_streaming_multiprocessors: None,
             num_tensor_cores: None,
             min_tensor_cores_dim: None,
@@ -313,6 +400,8 @@ impl TtServer {
 
         cubecl_cpp::register_supported_types(&mut device_props);
         cubecl_cpp::shared::register_wmma_features(Vec::new(), &mut device_props);
+        device_props.register_type_usage(OpaqueType::Barrier(BarrierLevel::Unit), TypeUsage::Buffer);
+        device_props.register_type_usage(OpaqueType::Barrier(BarrierLevel::Cube), TypeUsage::Buffer);
 
         let comp_opts = CompilationOptions {
             warp_size: arch.warp_size(),
@@ -372,7 +461,7 @@ impl TtServer {
     fn launch_checked(
         &mut self,
         kernel: Box<dyn CubeTask<TtCompiler>>,
-        _count: CubeCount,
+        count: CubeCount,
         bindings: KernelArguments,
         mode: ExecutionMode,
         stream_id: StreamId,
@@ -403,7 +492,7 @@ impl TtServer {
 
         let _ = println!("[launch_checked] calling kernel_cube\n");
         command
-            .kernel_cube(kernel, mode, &resources, &bindings.info, logger)
+            .kernel_cube(kernel, count, mode, &resources, &bindings.info, logger)
             .map_err(ServerError::Launch)
     }
 

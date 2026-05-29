@@ -7,6 +7,7 @@ use cubecl_core::server::{ExecutionMode, LaunchError};
 use cubecl_cpp::shared::CompilationOptions;
 use cubecl_cpp::tt_metal::TtKernelSources;
 use cubecl_runtime::compiler::CubeTask;
+use cubecl_runtime::server::CubeCount;
 use cubecl_runtime::id::KernelId;
 use cubecl_runtime::kernel::Visibility;
 use cubecl_runtime::timestamp_profiler::TimestampProfiler;
@@ -222,6 +223,11 @@ impl TtContext {
         compute_config
             .set_math_fidelity(MathFidelity::HiFi4)
             .set_opt_level(KernelBuildOptLevel::O3);
+        if matches!(cb_format, DataFormat::Float32) {
+            compute_config
+                .set_fp32_dest_acc_en(true)
+                .set_dst_full_sync_en(true);
+        }
         let compute_id = program
             .create_compute_kernel_from_string_with_config(
                 &sources.compute_source,
@@ -246,6 +252,7 @@ impl TtContext {
         writer_args.extend(output_addrs.iter().copied());
         writer_args.push(sources.num_tiles);
         writer_args.extend(sources.writer_runtime_args.iter().copied());
+        println!("[compile_kernel] writer_args={:?}", writer_args);
         program
             .set_runtime_args(writer_id, core, &writer_args)
             .map_err(map_launch_err("writer runtime args"))?;
@@ -267,15 +274,15 @@ impl TtContext {
         })
     }
 
-    /// Compile a `CubeTask` into a TT-Metal program.
-    pub fn compile_cube_task(
+    /// Compile a `CubeTask` into a prepared TT-Metal launch description.
+    pub fn prepare_cube_task_launch(
         &mut self,
         cube_kernel: Box<dyn CubeTask<TtCompiler>>,
         mode: ExecutionMode,
+        count: CubeCount,
         resources: &[TtResource],
         info: &cubecl_runtime::server::MetadataBindingInfo,
-        logger: Arc<ServerLogger>,
-    ) -> Result<TtCompiledKernel, LaunchError> {
+    ) -> Result<PreparedLaunch, LaunchError> {
         let _ = println!(
             "[compile_cube_task] enter
 "
@@ -312,13 +319,25 @@ impl TtContext {
                 return Err(LaunchError::CompilationError(err));
             }
         };
-        let prepared = match prepare_launch(repr, sources, resources, info) {
-            Ok(prepared) => prepared,
+        match prepare_launch(repr, sources, resources, info, count) {
+            Ok(prepared) => Ok(prepared),
             Err(err) => {
                 eprintln!("[compile_cube_task] prepare_launch failed: {err:?}");
-                return Err(err);
+                Err(err)
             }
-        };
+        }
+    }
+
+    /// Compile a `CubeTask` into a TT-Metal program.
+    pub fn compile_cube_task(
+        &mut self,
+        cube_kernel: Box<dyn CubeTask<TtCompiler>>,
+        mode: ExecutionMode,
+        resources: &[TtResource],
+        info: &cubecl_runtime::server::MetadataBindingInfo,
+        logger: Arc<ServerLogger>,
+    ) -> Result<TtCompiledKernel, LaunchError> {
+        let prepared = self.prepare_cube_task_launch(cube_kernel, mode, CubeCount::Static(1, 1, 1), resources, info)?;
 
         let _ = println!(
             "[compile_cube_task] calling compile_kernel
@@ -380,6 +399,7 @@ pub(crate) fn prepare_launch(
     mut sources: TtKernelSources,
     resources: &[TtResource],
     info: &cubecl_runtime::server::MetadataBindingInfo,
+    count: CubeCount,
 ) -> Result<PreparedLaunch, LaunchError> {
     if resources.len() != repr.buffers.len() {
         return Err(kernel_build_error(&format!(
@@ -403,14 +423,67 @@ pub(crate) fn prepare_launch(
         })
         .collect::<Vec<_>>();
 
-    let input_bindings = bindings
+
+    let launched_num_units = match count {
+        CubeCount::Static(x, y, z) => x
+            .saturating_mul(y)
+            .saturating_mul(z)
+            .saturating_mul(repr.cube_dim.num_elems())
+            .max(1),
+        CubeCount::Dynamic(_) => 0,
+    };
+
+    let launched_cube_count = match count {
+        CubeCount::Static(x, y, z) => [x, y, z],
+        CubeCount::Dynamic(_) => [0, 0, 0],
+    };
+
+    let input_binding_indices = if sources.input_binding_indices.is_empty() && sources.num_inputs > 0 {
+        bindings
+            .iter()
+            .enumerate()
+            .filter_map(|(index, binding)| {
+                matches!(binding.visibility, Visibility::Read).then_some(index)
+            })
+            .collect::<Vec<_>>()
+    } else {
+        sources.input_binding_indices.clone()
+    };
+    let output_binding_indices = if sources.output_binding_indices.is_empty() && sources.num_outputs > 0 {
+        bindings
+            .iter()
+            .enumerate()
+            .filter_map(|(index, binding)| {
+                matches!(binding.visibility, Visibility::ReadWrite).then_some(index)
+            })
+            .collect::<Vec<_>>()
+    } else {
+        sources.output_binding_indices.clone()
+    };
+    let input_bindings = input_binding_indices
         .iter()
-        .filter(|binding| matches!(binding.visibility, Visibility::Read))
-        .collect::<Vec<_>>();
-    let output_bindings = bindings
+        .map(|&index| {
+            bindings.get(index).ok_or_else(|| {
+                kernel_build_error(&format!(
+                    "reader binding index {} out of range for {} runtime bindings",
+                    index,
+                    bindings.len(),
+                ))
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let output_bindings = output_binding_indices
         .iter()
-        .filter(|binding| matches!(binding.visibility, Visibility::ReadWrite))
-        .collect::<Vec<_>>();
+        .map(|&index| {
+            bindings.get(index).ok_or_else(|| {
+                kernel_build_error(&format!(
+                    "writer binding index {} out of range for {} runtime bindings",
+                    index,
+                    bindings.len(),
+                ))
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
 
     if sources.num_inputs != input_bindings.len() as u32 {
         return Err(kernel_build_error(&format!(
@@ -435,13 +508,22 @@ pub(crate) fn prepare_launch(
         .iter()
         .map(|binding| binding.address)
         .collect::<Vec<_>>();
+    let rewrite_accessor_page_size = |compile_args: &[u32]| -> Vec<u32> {
+        let mut adjusted = compile_args.to_vec();
+        if !sources.requires_tiled_io() {
+            if let Some(page_size) = adjusted.get_mut(1) {
+                *page_size = sources.tile_size_bytes;
+            }
+        }
+        adjusted
+    };
     let reader_compile_args = input_bindings
         .iter()
-        .flat_map(|binding| binding.compile_args.iter().copied())
+        .flat_map(|binding| rewrite_accessor_page_size(&binding.compile_args))
         .collect::<Vec<_>>();
     let writer_compile_args = output_bindings
         .iter()
-        .flat_map(|binding| binding.compile_args.iter().copied())
+        .flat_map(|binding| rewrite_accessor_page_size(&binding.compile_args))
         .collect::<Vec<_>>();
     sources = sources.with_compile_args(reader_compile_args, writer_compile_args);
 
@@ -469,9 +551,69 @@ pub(crate) fn prepare_launch(
         }
     }
 
+    let logical_num_units = if sources.requires_tiled_io() {
+        let Some(first_binding) = bindings.first() else {
+            return Err(kernel_build_error(
+                "TT-Metal tiled I/O path requires at least one runtime binding",
+            ));
+        };
+        let item_size = u64::from(sources.native_scalar_size_bytes().max(1));
+        for (index, binding) in bindings.iter().enumerate() {
+            if binding.item_size_bytes != first_binding.item_size_bytes {
+                return Err(kernel_build_error(&format!(
+                    "TT-Metal tiled I/O path requires a uniform element size across bindings; binding 0 uses {} bytes but binding {index} uses {} bytes",
+                    first_binding.item_size_bytes, binding.item_size_bytes,
+                )));
+            }
+            if binding.logical_size_bytes != first_binding.logical_size_bytes {
+                return Err(kernel_build_error(&format!(
+                    "TT-Metal tiled I/O path currently requires matching logical buffer sizes across bindings; binding 0 uses {} bytes but binding {index} uses {} bytes",
+                    first_binding.logical_size_bytes, binding.logical_size_bytes,
+                )));
+            }
+        }
+
+        let tile_elems = u64::from(sources.tile_size_bytes) / item_size;
+        let logical_elems = first_binding.logical_size_bytes.div_ceil(item_size);
+        let native_tiles = logical_elems.div_ceil(tile_elems).max(1) as u32;
+        sources = sources.with_num_tiles(native_tiles);
+        logical_elems as u32
+    } else {
+        let unit_size = u64::from(sources.unit_item_size_bytes.max(1));
+        let logical_units = output_bindings
+            .iter()
+            .map(|binding| binding.logical_size_bytes.div_ceil(unit_size) as u32)
+            .max()
+            .unwrap_or_else(|| {
+                bindings
+                    .iter()
+                    .map(|binding| binding.logical_size_bytes.div_ceil(unit_size) as u32)
+                    .max()
+                    .unwrap_or(1)
+            })
+            .max(1);
+        let dispatched_units = if launched_num_units == 0 {
+            logical_units
+        } else {
+            launched_num_units
+        };
+        let tile_units = (sources.tile_size_bytes / sources.unit_item_size_bytes.max(1)).max(1);
+        let dispatched_tiles = dispatched_units.div_ceil(tile_units).max(1);
+        sources = sources.with_num_tiles(dispatched_tiles);
+        dispatched_units
+    };
+
     if !info.data.is_empty() {
         let packed_info_words = bytemuck::cast_slice::<u64, u32>(&info.data).to_vec();
-        sources = sources.with_writer_runtime_args(packed_info_words);
+        if sources.requires_tiled_io() {
+            sources = sources.with_writer_runtime_args(packed_info_words);
+        } else {
+            let mut writer_runtime_args = Vec::with_capacity(4 + packed_info_words.len());
+            writer_runtime_args.push(logical_num_units);
+            writer_runtime_args.extend_from_slice(&launched_cube_count);
+            writer_runtime_args.extend(packed_info_words);
+            sources = sources.with_writer_runtime_args(writer_runtime_args);
+        }
     } else {
         if repr.body.has_dynamic_meta {
             return Err(kernel_build_error(
@@ -507,7 +649,17 @@ pub(crate) fn prepare_launch(
                 )));
             }
             sources = sources.with_compute_runtime_args(compute_runtime_args.clone());
-            sources = sources.with_writer_runtime_args(compute_runtime_args);
+            if sources.requires_tiled_io() {
+                sources = sources.with_writer_runtime_args(compute_runtime_args);
+            } else {
+                let mut writer_runtime_args = Vec::with_capacity(4 + compute_runtime_args.len());
+                writer_runtime_args.push(logical_num_units);
+                writer_runtime_args.extend_from_slice(&launched_cube_count);
+                writer_runtime_args.extend(compute_runtime_args);
+                sources = sources.with_writer_runtime_args(writer_runtime_args);
+            }
+        } else if !sources.requires_tiled_io() {
+            sources = sources.with_writer_runtime_args(vec![logical_num_units, launched_cube_count[0], launched_cube_count[1], launched_cube_count[2]]);
         }
     }
 

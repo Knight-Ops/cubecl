@@ -107,6 +107,56 @@ macro_rules! test_binary_impl {
     };
 }
 
+macro_rules! binary_case_runner {
+    ($helper_name:ident, $op:tt) => {
+        pub fn $helper_name<R: Runtime, F: Float + num_traits::Float + CubeElement + Display>(
+            client: ComputeClient<R>,
+            input_vectorization: usize,
+            out_vectorization: usize,
+            lhs: &[F],
+            rhs: &[F],
+            expected: &[F],
+            epsilon: f32,
+        ) {
+            #[cube(launch_unchecked, fast_math = *FAST_MATH)]
+            fn test_function<F: Float, In: Size, Out: Size>(
+                lhs: &Array<Vector<F, In>>,
+                rhs: &Array<Vector<F, In>>,
+                output: &mut Array<Vector<F, Out>>,
+            ) {
+                if ABSOLUTE_POS < rhs.len() {
+                    output[ABSOLUTE_POS] =
+                        Vector::cast_from(lhs[ABSOLUTE_POS] $op rhs[ABSOLUTE_POS]);
+                }
+            }
+
+            let output_handle = client.empty(expected.len() * core::mem::size_of::<F>());
+            let lhs_handle = client.create_from_slice(F::as_bytes(lhs));
+            let rhs_handle = client.create_from_slice(F::as_bytes(rhs));
+
+            unsafe {
+                test_function::launch_unchecked::<F, R>(
+                    &client,
+                    CubeCount::Static(1, 1, 1),
+                    CubeDim::new_1d((lhs.len() / input_vectorization) as u32),
+                    input_vectorization,
+                    out_vectorization,
+                    ArrayArg::from_raw_parts(lhs_handle, lhs.len()),
+                    ArrayArg::from_raw_parts(rhs_handle, rhs.len()),
+                    ArrayArg::from_raw_parts(output_handle.clone(), expected.len()),
+                )
+            };
+
+            assert_equals_approx::<R, F>(&client, output_handle, expected, epsilon);
+        }
+    };
+}
+
+binary_case_runner!(run_add_case, +);
+binary_case_runner!(run_sub_case, -);
+binary_case_runner!(run_mul_case, *);
+binary_case_runner!(run_div_case, /);
+
 test_binary_impl!(
     test_dot,
     F,
