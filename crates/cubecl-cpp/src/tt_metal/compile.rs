@@ -3,7 +3,10 @@ use cubecl_core::ir::BarrierLevel;
 use cubecl_core::prelude::Visibility;
 use cubecl_runtime::compiler::{CompilationError, Compiler};
 
-use crate::shared::{AtomicKind, BarrierOps, CompilationOptions, ComputeKernel, Component, CppCompiler, Elem, Instruction, Item, Variable};
+use crate::shared::{
+    AtomicKind, BarrierOps, CompilationOptions, Component, ComputeKernel, CppCompiler, Elem,
+    Instruction, Item, Variable,
+};
 use crate::tt_metal::dialect::TtMetalDialect;
 
 use super::kernel::{TtBinaryComputeOp, TtKernelSources, TtUnaryComputeOp};
@@ -372,7 +375,7 @@ fn uses_atomic_writer_output(instructions: &[Instruction<TtMetalDialect>]) -> bo
     instructions.iter().any(|instruction| match instruction {
         Instruction::AtomicLoad(_)
         | Instruction::AtomicStore(_)
-                | Instruction::AtomicSub(_)
+        | Instruction::AtomicSub(_)
         | Instruction::AtomicMax(_)
         | Instruction::AtomicMin(_) => true,
         Instruction::RangeLoop { instructions, .. }
@@ -517,18 +520,17 @@ fn supports_cube_shared_barrier_subset(repr: &ComputeKernel<TtMetalDialect>) -> 
                 | Instruction::Add(_)
                 | Instruction::Mul(_)
                 | Instruction::RangeLoop { .. }
-        ) || !matches!(instruction, Instruction::Barrier(_) | Instruction::SyncThreads)
+        ) || !matches!(
+            instruction,
+            Instruction::Barrier(_) | Instruction::SyncThreads
+        )
     })
 }
-
 
 fn detect_supported_compute_kind(
     repr: &ComputeKernel<TtMetalDialect>,
 ) -> Result<SupportedComputeKind, CompilationError> {
-    fn set_native_kind(
-        compute_kind: &mut SupportedComputeKind,
-        new_kind: SupportedComputeKind,
-    ) {
+    fn set_native_kind(compute_kind: &mut SupportedComputeKind, new_kind: SupportedComputeKind) {
         if matches!(*compute_kind, SupportedComputeKind::Copy) {
             *compute_kind = new_kind;
         } else if *compute_kind != new_kind {
@@ -571,7 +573,8 @@ fn detect_supported_compute_kind(
         let mut index = 0;
         while index < instructions.len() {
             let instruction = &instructions[index];
-            if let Some(nested) = is_bounds_check_compare(instruction, instructions.get(index + 1)) {
+            if let Some(nested) = is_bounds_check_compare(instruction, instructions.get(index + 1))
+            {
                 visit_instructions(nested, compute_kind)?;
                 index += 2;
                 continue;
@@ -753,8 +756,7 @@ fn detect_supported_compute_kind(
                         ..
                     }
                     | BarrierOps::MemCopyAsync {
-                        cooperative: false,
-                        ..
+                        cooperative: false, ..
                     } => {
                         *compute_kind = SupportedComputeKind::Generic;
                     }

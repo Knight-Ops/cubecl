@@ -71,7 +71,6 @@ impl ComputeServer for TtServer {
     }
 
     fn initialize_memory(&mut self, memory: ManagedMemoryHandle, size: u64, stream_id: StreamId) {
-        println!("[initialize_memory] size={size}");
         let mut command = match self.command_no_inputs(
             stream_id,
             StreamErrorMode {
@@ -85,7 +84,6 @@ impl ComputeServer for TtServer {
         match command.reserve(size) {
             Ok(reserved) => {
                 command.bind(reserved, memory);
-                println!("[initialize_memory] done");
             }
             Err(err) => command.error(ServerError::Io(err)),
         }
@@ -121,7 +119,6 @@ impl ComputeServer for TtServer {
     }
 
     fn write(&mut self, descriptors: Vec<(CopyDescriptor, Bytes)>, stream_id: StreamId) {
-        println!("[write] enter {} descriptors", descriptors.len());
         let mut command = match self.command(
             stream_id,
             descriptors.iter().map(|desc| &desc.0.handle),
@@ -143,7 +140,6 @@ impl ComputeServer for TtServer {
                 return;
             }
         }
-        println!("[write] done");
     }
 
     unsafe fn launch(
@@ -154,7 +150,6 @@ impl ComputeServer for TtServer {
         mode: ExecutionMode,
         stream_id: StreamId,
     ) {
-        let _ = println!("[launch] enter\n");
         if let Err(err) = self.launch_checked(kernel, count, bindings, mode, stream_id) {
             let mut stream = match self.streams.resolve(stream_id, [].into_iter(), false) {
                 Ok(stream) => stream,
@@ -162,7 +157,6 @@ impl ComputeServer for TtServer {
             };
             stream.current().error(err);
         }
-        let _ = println!("[launch] exit\n");
     }
 
     fn flush(&mut self, stream_id: StreamId) -> Result<(), ServerError> {
@@ -278,7 +272,10 @@ impl ServerCommunication for TtServer {
         )
     }
 
-    fn comm_init(&mut self, device_ids: Vec<cubecl_common::device::DeviceId>) -> Result<(), ServerError> {
+    fn comm_init(
+        &mut self,
+        device_ids: Vec<cubecl_common::device::DeviceId>,
+    ) -> Result<(), ServerError> {
         if device_ids.len() <= 1 {
             return Ok(());
         }
@@ -320,14 +317,18 @@ impl ServerCommunication for TtServer {
             },
         )?;
 
-        let src_resource = command.resource(src.clone()).map_err(|e| ServerError::Generic {
-            reason: format!("all_reduce source resource: {e:?}"),
-            backtrace: BackTrace::capture(),
-        })?;
-        let dst_resource = command.resource(dst.clone()).map_err(|e| ServerError::Generic {
-            reason: format!("all_reduce destination resource: {e:?}"),
-            backtrace: BackTrace::capture(),
-        })?;
+        let src_resource = command
+            .resource(src.clone())
+            .map_err(|e| ServerError::Generic {
+                reason: format!("all_reduce source resource: {e:?}"),
+                backtrace: BackTrace::capture(),
+            })?;
+        let dst_resource = command
+            .resource(dst.clone())
+            .map_err(|e| ServerError::Generic {
+                reason: format!("all_reduce destination resource: {e:?}"),
+                backtrace: BackTrace::capture(),
+            })?;
 
         let logical_size = src.size_in_used() as usize;
         if dst.size_in_used() < src.size_in_used() {
@@ -400,8 +401,10 @@ impl TtServer {
 
         cubecl_cpp::register_supported_types(&mut device_props);
         cubecl_cpp::shared::register_wmma_features(Vec::new(), &mut device_props);
-        device_props.register_type_usage(OpaqueType::Barrier(BarrierLevel::Unit), TypeUsage::Buffer);
-        device_props.register_type_usage(OpaqueType::Barrier(BarrierLevel::Cube), TypeUsage::Buffer);
+        device_props
+            .register_type_usage(OpaqueType::Barrier(BarrierLevel::Unit), TypeUsage::Buffer);
+        device_props
+            .register_type_usage(OpaqueType::Barrier(BarrierLevel::Cube), TypeUsage::Buffer);
 
         let comp_opts = CompilationOptions {
             warp_size: arch.warp_size(),
@@ -432,7 +435,6 @@ impl TtServer {
         mem_config: MemoryConfiguration,
         utilities: ServerUtilities<Self>,
     ) -> Self {
-        println!("[TtServer::new] enter");
         let config = CubeClRuntimeConfig::get();
         let max_streams = config.streaming.max_streams;
 
@@ -441,14 +443,12 @@ impl TtServer {
         let mesh_ptr: *const libtt_metal_cxx::MeshDevice = mesh;
         let backend = TtStreamBackend::new(mesh_ptr, mem_props, mem_config.clone());
 
-        println!("[TtServer::new] creating MultiStream");
         let server = Self {
             mesh,
             ctx,
             streams: MultiStream::new(utilities.logger.clone(), backend, max_streams),
             utilities: Arc::new(utilities),
         };
-        println!("[TtServer::new] done");
         server
     }
 
@@ -466,7 +466,6 @@ impl TtServer {
         mode: ExecutionMode,
         stream_id: StreamId,
     ) -> Result<(), ServerError> {
-        let _ = println!("[launch_checked] enter\n");
         let logger = self.streams.logger.clone();
         let mut command = self.command(
             stream_id,
@@ -490,7 +489,6 @@ impl TtServer {
             })
             .collect::<Result<Vec<_>, _>>()?;
 
-        let _ = println!("[launch_checked] calling kernel_cube\n");
         command
             .kernel_cube(kernel, count, mode, &resources, &bindings.info, logger)
             .map_err(ServerError::Launch)

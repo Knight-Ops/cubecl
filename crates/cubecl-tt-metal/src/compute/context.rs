@@ -7,9 +7,9 @@ use cubecl_core::server::{ExecutionMode, LaunchError};
 use cubecl_cpp::shared::CompilationOptions;
 use cubecl_cpp::tt_metal::TtKernelSources;
 use cubecl_runtime::compiler::CubeTask;
-use cubecl_runtime::server::CubeCount;
 use cubecl_runtime::id::KernelId;
 use cubecl_runtime::kernel::Visibility;
+use cubecl_runtime::server::CubeCount;
 use cubecl_runtime::timestamp_profiler::TimestampProfiler;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -246,9 +246,8 @@ impl TtContext {
             .set_runtime_args(reader_id, core, &reader_args)
             .map_err(map_launch_err("reader runtime args"))?;
 
-        let mut writer_args = Vec::with_capacity(
-            output_addrs.len() + 1 + sources.writer_runtime_args.len(),
-        );
+        let mut writer_args =
+            Vec::with_capacity(output_addrs.len() + 1 + sources.writer_runtime_args.len());
         writer_args.extend(output_addrs.iter().copied());
         writer_args.push(sources.num_tiles);
         writer_args.extend(sources.writer_runtime_args.iter().copied());
@@ -337,7 +336,13 @@ impl TtContext {
         info: &cubecl_runtime::server::MetadataBindingInfo,
         logger: Arc<ServerLogger>,
     ) -> Result<TtCompiledKernel, LaunchError> {
-        let prepared = self.prepare_cube_task_launch(cube_kernel, mode, CubeCount::Static(1, 1, 1), resources, info)?;
+        let prepared = self.prepare_cube_task_launch(
+            cube_kernel,
+            mode,
+            CubeCount::Static(1, 1, 1),
+            resources,
+            info,
+        )?;
 
         let _ = println!(
             "[compile_cube_task] calling compile_kernel
@@ -423,7 +428,6 @@ pub(crate) fn prepare_launch(
         })
         .collect::<Vec<_>>();
 
-
     let launched_num_units = match count {
         CubeCount::Static(x, y, z) => x
             .saturating_mul(y)
@@ -438,28 +442,30 @@ pub(crate) fn prepare_launch(
         CubeCount::Dynamic(_) => [0, 0, 0],
     };
 
-    let input_binding_indices = if sources.input_binding_indices.is_empty() && sources.num_inputs > 0 {
-        bindings
-            .iter()
-            .enumerate()
-            .filter_map(|(index, binding)| {
-                matches!(binding.visibility, Visibility::Read).then_some(index)
-            })
-            .collect::<Vec<_>>()
-    } else {
-        sources.input_binding_indices.clone()
-    };
-    let output_binding_indices = if sources.output_binding_indices.is_empty() && sources.num_outputs > 0 {
-        bindings
-            .iter()
-            .enumerate()
-            .filter_map(|(index, binding)| {
-                matches!(binding.visibility, Visibility::ReadWrite).then_some(index)
-            })
-            .collect::<Vec<_>>()
-    } else {
-        sources.output_binding_indices.clone()
-    };
+    let input_binding_indices =
+        if sources.input_binding_indices.is_empty() && sources.num_inputs > 0 {
+            bindings
+                .iter()
+                .enumerate()
+                .filter_map(|(index, binding)| {
+                    matches!(binding.visibility, Visibility::Read).then_some(index)
+                })
+                .collect::<Vec<_>>()
+        } else {
+            sources.input_binding_indices.clone()
+        };
+    let output_binding_indices =
+        if sources.output_binding_indices.is_empty() && sources.num_outputs > 0 {
+            bindings
+                .iter()
+                .enumerate()
+                .filter_map(|(index, binding)| {
+                    matches!(binding.visibility, Visibility::ReadWrite).then_some(index)
+                })
+                .collect::<Vec<_>>()
+        } else {
+            sources.output_binding_indices.clone()
+        };
     let input_bindings = input_binding_indices
         .iter()
         .map(|&index| {
@@ -659,7 +665,12 @@ pub(crate) fn prepare_launch(
                 sources = sources.with_writer_runtime_args(writer_runtime_args);
             }
         } else if !sources.requires_tiled_io() {
-            sources = sources.with_writer_runtime_args(vec![logical_num_units, launched_cube_count[0], launched_cube_count[1], launched_cube_count[2]]);
+            sources = sources.with_writer_runtime_args(vec![
+                logical_num_units,
+                launched_cube_count[0],
+                launched_cube_count[1],
+                launched_cube_count[2],
+            ]);
         }
     }
 

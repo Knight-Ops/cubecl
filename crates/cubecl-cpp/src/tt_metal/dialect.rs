@@ -10,10 +10,10 @@ use crate::shared::Instruction;
 use crate::shared::binary::{Add, Binary, Max, Min};
 use crate::shared::{
     self, Component, DialectBindings, DialectCubeBuiltins, DialectIncludes, DialectInstructions,
-    FmtLeft,
     DialectProcessors, DialectTypes, DialectWarpReduceCompiler, DialectWmmaCompiler, Elem, Flags,
-    Fragment, FragmentIdent, FragmentLayout, Item, KernelArg, ManualMma, SupportedMmaCombinations,
-    SupportedScaledMmaCombinations, Variable, WarpInstruction, WmmaInstruction,
+    FmtLeft, Fragment, FragmentIdent, FragmentLayout, Item, KernelArg, ManualMma,
+    SupportedMmaCombinations, SupportedScaledMmaCombinations, Variable, WarpInstruction,
+    WmmaInstruction,
 };
 
 use super::arch::TtArchitecture;
@@ -140,14 +140,17 @@ impl<Wmma: DialectWmmaCompiler<Self>> DialectTypes<Self> for TtMetalDialect<Wmma
             } => {
                 let size_bytes = length * item.size();
                 let align = (*align).max(1);
-                writeln!(f, "// TT shared scratch array size: {length}, {size_bytes} bytes")?;
-                writeln!(f, "alignas({align}) {item} shared_memory_{index}[{length}];")
+                writeln!(
+                    f,
+                    "// TT shared scratch array size: {length}, {size_bytes} bytes"
+                )?;
+                writeln!(
+                    f,
+                    "alignas({align}) {item} shared_memory_{index}[{length}];"
+                )
             }
             shared::SharedMemory::Value {
-                index,
-                item,
-                align,
-                ..
+                index, item, align, ..
             } => {
                 let size_bytes = item.size();
                 let align = (*align).max(1);
@@ -477,7 +480,9 @@ impl<Wmma: DialectWmmaCompiler<Self>> DialectInstructions<Self> for TtMetalDiale
         out_elem: Elem<Self>,
     ) -> fmt::Result {
         match input.elem() {
-            shared::Elem::I64 | shared::Elem::U64 => write!(f, "{out_elem}(__builtin_ffsll(uint64_t({input})))"),
+            shared::Elem::I64 | shared::Elem::U64 => {
+                write!(f, "{out_elem}(__builtin_ffsll(uint64_t({input})))")
+            }
             _ => write!(f, "{out_elem}(__builtin_ffs(uint32_t({input})))"),
         }
     }

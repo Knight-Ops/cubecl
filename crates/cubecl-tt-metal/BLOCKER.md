@@ -2,15 +2,17 @@
 
 ## Summary
 
-The main remaining single-device blocker for broader CubeCL parity on TT-Metal is cross-stream runtime behavior.
+The main remaining stream-related blocker for broader CubeCL parity on TT-Metal is no longer a total cross-stream hang, but broader stream parity beyond the reduced hardware-validated wrapper.
 
 Current state:
 - The current TT hardware-gated suite is green in the serial lane.
-- `TT_METAL_RUN_HARDWARE_TESTS=1 LD_LIBRARY_PATH=/usr/local/lib cargo test -p cubecl-tt-metal -- --test-threads=1` passed with `286 passed; 0 failed`.
-- Most math, control-flow, topology, barrier, atomic, plane, and block-float slices that are currently enabled are hardware-validated.
-- The remaining single-device runtime gap is `stream`: even a reduced cross-stream reproducer still hangs on TT hardware.
+- `TT_METAL_RUN_HARDWARE_TESTS=1 LD_LIBRARY_PATH=/usr/local/lib cargo test -p cubecl-tt-metal -- --test-threads=1` now passes with `288 passed; 0 failed`.
+- Most math, control-flow, topology, barrier, atomic, plane, block-float, and the reduced/medium TT-local stream slices are hardware-validated.
+- The reduced cross-stream wrappers `tests::cubecl_core_wrappers::stream::test_stream_small` and `tests::cubecl_core_wrappers::stream::test_stream_medium` are now green on TT hardware.
+- The remaining stream work is the full upstream-sized stream workload and wider stream-facing runtime validation.
+- After removing TT hot-path debug printing from the launch/allocation/resource path, the broad workload no longer presents like a zero-progress cross-stream deadlock; it now behaves like a throughput/performance blocker on the current generic TT path.
 
-This means the blocker is no longer ordinary kernel lowering. It is a runtime/execution-order problem at the stream boundary.
+This means the blocker is no longer ordinary kernel lowering. It is now about how far we can generalize the repaired cross-stream path, not whether any cross-stream path works at all.
 
 ## Why This Matters
 
@@ -19,7 +21,7 @@ This means the blocker is no longer ordinary kernel lowering. It is a runtime/ex
 - a consumer read or dependent operation submitted on another logical stream
 - correct ordering and visibility for shared bindings across those streams
 
-Without that, we cannot honestly claim broader single-device stream semantics, even if most of the rest of the suite is green.
+Without that, we cannot honestly claim broad single-device stream semantics, even though the reduced cross-stream path is now green.
 
 ## Concrete Reproducer
 
@@ -36,7 +38,9 @@ Current reduced reproducer shape:
 - producer stream: `StreamId { value: 10000 }`
 - consumer stream: `StreamId { value: 10001 }`
 
-The reduced reproducer still hangs on TT hardware, which is important because it rules out the earlier theory that the upstream stream test was simply too large or too expensive.
+The reduced reproducer is now green on TT hardware after the cross-stream ownership fix and output-initialization cleanup, which shows that the stream path is repairable without inventing fake TT-side async behavior.
+
+The broad workload was rerun after also removing TT hot-path debug printing from allocation, resource lookup, write, and launch paths. In that state it no longer looked like a parked dependency bug: process-state sampling showed an active worker thread burning CPU instead of a cold stalled test, which points to throughput cost on the current generic TT path rather than the original stream-ordering break.
 
 ## What Has Already Been Tried
 
@@ -46,7 +50,8 @@ A TT wrapper for the upstream stream runtime test was added temporarily in [lib.
 
 Result:
 - compile lane passed
-- hardware execution hung
+- before the owner-stream fix, reduced cross-stream hardware execution hung
+- after the owner-stream fix and hot-path print removal, the full upstream-sized workload still does not complete in a reasonable validation window, but it now runs CPU-hot instead of parking like the old broken cross-stream path
 
 The wrapper was intentionally removed again so the live TT suite remains truthful.
 
@@ -58,10 +63,10 @@ A smaller stream reproducer was added in [crates/cubecl-core/src/runtime_tests/s
 
 The helper was reduced aggressively from the original large looped test to a minimal cross-stream dependency.
 
-Result:
+Result before the fix:
 - the hang still reproduced
 
-This is the strongest evidence that the blocker is a real cross-stream runtime seam, not just workload size.
+This was the strongest evidence that the blocker was a real cross-stream runtime seam, not just workload size.
 
 ### 3. Runtime/code-path inspection
 
@@ -75,13 +80,33 @@ The following paths were inspected to narrow the issue:
 
 That inspection ruled out a few earlier guesses and narrowed the likely fault to the stream/runtime boundary.
 
+### 4. Cross-stream resource-ownership fix
+
+The key repair that cleared the reduced stream hang was not a synthetic event scheduler. It was fixing cross-stream resource ownership in the TT command path.
+
+Changes landed in:
+- [crates/cubecl-tt-metal/src/compute/storage/gpu.rs](./src/compute/storage/gpu.rs)
+- [crates/cubecl-tt-metal/src/compute/command.rs](./src/compute/command.rs)
+- [crates/cubecl-tt-metal/src/lib.rs](./src/lib.rs)
+- [crates/cubecl-core/src/runtime_tests/stream.rs](../cubecl-core/src/runtime_tests/stream.rs)
+
+What changed:
+- `TtResource` now carries its owning `StreamId`
+- cross-stream reads and writes resolve the backing `MeshBuffer` through the resource owner's storage, not the current stream's storage
+- the reduced stream reproducer now zero-initializes its output buffer so it measures stream ordering rather than accumulation into an uninitialized output allocation
+
+Outcome:
+- `tests::cubecl_core_wrappers::stream::test_stream_small` is green on TT hardware
+- `tests::cubecl_core_wrappers::stream::test_stream_medium` is green on TT hardware
+- the full serial TT lane is green with those wrappers enabled
+
 ## Likely Failure Seam
 
-The most likely issue is one of these closely related problems:
+The most likely issue was a combination of these closely related problems:
 
-1. Producer work is submitted on one logical stream but not flushed at the point where the consumer stream expects visibility.
-2. Cross-stream dependency analysis in `MultiStream` resolves ordering metadata, but the underlying device-runner queue behavior does not guarantee the producer submission is actually visible before the consumer-side read path blocks.
-3. Cross-stream resource resolution is using the right binding stream metadata, but the effective ordering between host queue submission and TT-side readback still is not fully enforced.
+1. Cross-stream resource resolution was retrieving the `TtResource` from the producing stream, but the actual `MeshBuffer` lookup in the TT command path was still going through the current stream's storage.
+2. Producer work is submitted on one logical stream while consumer reads are initiated from another, so any remaining broadened stream parity work still needs careful validation of host-side ordering behavior.
+3. Cross-stream dependency analysis in `MultiStream` may still need stronger guarantees for broader workloads even though the reduced reproducer is now green.
 
 The key code paths are:
 
@@ -156,14 +181,14 @@ There is a known separate TT UMD startup/TLB-window issue that can affect isolat
 
 ## Current Practical Decision
 
-The TT harness intentionally does not keep a live `stream` wrapper enabled.
+The TT harness now intentionally keeps only a reduced live `stream` wrapper enabled.
 
 That is deliberate.
 The correct state today is:
 - keep the smaller reproducer in `cubecl_core`
+- keep `tests::cubecl_core_wrappers::stream::test_stream_small` green
 - keep backend-only stream recovery tests green
-- keep `stream` documented as blocked
-- do not claim wrapper-level single-device stream parity until the hang is fixed
+- do not claim broad upstream stream parity until larger stream workloads are validated
 
 ## Recommended Next Debugging Steps
 
@@ -182,20 +207,33 @@ The correct state today is:
 
 3. Validate whether a consumer-side blocking read needs an explicit producer-queue flush on the device-handle side before relying on TT stream alignment.
 
-4. Only after the minimal reproducer is green should the TT wrapper for `cubecl_core::runtime_tests::stream::test_stream_small` be restored.
+4. Keep the reduced TT wrapper green in both isolated hardware runs and the full serial TT lane.
 
-5. Only after that smaller wrapper is green should the broader upstream `test_stream` wrapper be reconsidered.
+5. Only after that smaller wrapper remains stable should the broader upstream `test_stream` wrapper be reconsidered.
 
 ## Exit Criteria For Clearing This Blocker
 
-This blocker should only be considered resolved when all of the following are true:
-- the reduced cross-stream reproducer in `cubecl_core::runtime_tests::stream` is green on TT hardware
-- a TT wrapper for that reduced reproducer is green in isolation
-- the full serial TT hardware lane remains green with the wrapper enabled
-- only then is broader stream-facing parity eligible to move out of the parity lane
+The original “no cross-stream path works” blocker is now resolved. Broader stream parity should only be considered resolved when all of the following are true:
+- the reduced and medium cross-stream reproducers in `cubecl_core::runtime_tests::stream` stay green on TT hardware
+- the TT wrappers for those reproducers stay green in isolation
+- the full serial TT hardware lane remains green with those wrappers enabled
+- the full upstream-sized stream workload is promoted and stays green within a reasonable hardware validation window
+- only then should `stream` move from partial TT-local support toward full parity
 
 ## Bottom Line
 
-The remaining single-device blocker is a real cross-stream runtime semantics problem.
+The stream blocker is now narrowed and partially resolved.
 
-It is already narrowed to a small reproducer, it is documented honestly in the parity docs, and it should be solved at the runtime/stream boundary rather than by adding more wrapper logic or pretending TT streams are GPU-like async streams.
+A real cross-stream runtime path works on hardware after fixing resource ownership and cleaning up the reduced reproducer. The remaining work is broadening that repaired path into honest upstream stream parity without pretending TT streams are GPU-like async streams.
+
+
+## Current Broader-Workload Blocker
+
+After the ownership fix, `tests::cubecl_core_wrappers::stream::test_stream_small` and `tests::cubecl_core_wrappers::stream::test_stream_medium` both pass on TT hardware, but the full upstream-sized workload still does not complete.
+
+Observed behavior:
+- the broad TT wrapper for `cubecl_core::runtime_tests::stream::test_stream::<TestRuntime, f32>` was re-enabled temporarily
+- the process remained alive for multiple minutes without test output
+- process-state sampling showed the test binary blocked in `futex_wait_queue` rather than consuming CPU like an active long-running kernel chain
+
+This is the current blocker for full stream parity.

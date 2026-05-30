@@ -1,7 +1,10 @@
 use std::collections::HashSet;
 use std::fmt::{self, Display, Write};
 
-use crate::shared::{self, BarrierOps, Component, ComputeKernel, FmtLeft, IndexInstruction, Instruction, Item, Variable, WarpInstruction};
+use crate::shared::{
+    self, BarrierOps, Component, ComputeKernel, FmtLeft, IndexInstruction, Instruction, Item,
+    Variable, WarpInstruction,
+};
 
 use super::compile::TtKernelAnalysis;
 use super::dialect::TtMetalDialect;
@@ -214,7 +217,8 @@ void kernel_main() {
         cb_push_back(cb_out0, 1);
     }
 }
-"#.to_string();
+"#
+        .to_string();
     }
 
     let (init_fn, op_fn) = binary_compute_init_and_op(op).expect("non-div binary op expected");
@@ -260,9 +264,7 @@ pub fn generate_add_compute_source() -> String {
     generate_binary_compute_source(TtBinaryComputeOp::Add)
 }
 
-fn unary_compute_spec(
-    op: TtUnaryComputeOp,
-) -> (Option<&'static str>, &'static str, &'static str) {
+fn unary_compute_spec(op: TtUnaryComputeOp) -> (Option<&'static str>, &'static str, &'static str) {
     match op {
         TtUnaryComputeOp::Abs => (None, "abs_tile_init", "abs_tile"),
         TtUnaryComputeOp::Sqrt => (Some("sqrt"), "sqrt_tile_init", "sqrt_tile"),
@@ -279,8 +281,12 @@ fn unary_compute_spec(
 pub fn generate_unary_compute_source(op: TtUnaryComputeOp) -> String {
     let (header, init_fn, op_fn) = unary_compute_spec(op);
     let op_include = header
-        .map(|header| format!(r#"#include "api/compute/eltwise_unary/{header}.h"
-"#))
+        .map(|header| {
+            format!(
+                r#"#include "api/compute/eltwise_unary/{header}.h"
+"#
+            )
+        })
         .unwrap_or_default();
     format!(
         r#"#include "api/compute/common.h"
@@ -319,7 +325,8 @@ void kernel_main() {{
 }
 pub fn generate_noop_compute_source() -> String {
     "void kernel_main() {}
-".to_string()
+"
+    .to_string()
 }
 
 #[derive(Clone)]
@@ -382,16 +389,29 @@ impl TtWarpLoweringState {
 
     fn bind(&mut self, var: &Variable<TtMetalDialect>, source: TtWarpSource) {
         let key = tt_variable_key(var);
-        if let Some((_, existing)) = self.aliases.iter_mut().rev().find(|(candidate, _)| *candidate == key) {
+        if let Some((_, existing)) = self
+            .aliases
+            .iter_mut()
+            .rev()
+            .find(|(candidate, _)| *candidate == key)
+        {
             *existing = source;
         } else {
             self.aliases.push((key, source));
         }
     }
 
-    fn record_snapshot(&mut self, buffer: &Variable<TtMetalDialect>, item: Item<TtMetalDialect>) -> String {
+    fn record_snapshot(
+        &mut self,
+        buffer: &Variable<TtMetalDialect>,
+        item: Item<TtMetalDialect>,
+    ) -> String {
         let buffer_name = format!("{buffer}");
-        if let Some(existing) = self.snapshots.iter().find(|snapshot| snapshot.buffer_name == buffer_name) {
+        if let Some(existing) = self
+            .snapshots
+            .iter()
+            .find(|snapshot| snapshot.buffer_name == buffer_name)
+        {
             return existing.snapshot_name.clone();
         }
         let snapshot_name = format!("tt_plane_snapshot_{}", tt_sanitize_name(&buffer_name));
@@ -405,12 +425,11 @@ impl TtWarpLoweringState {
 
     fn observe_instruction(&mut self, instruction: &Instruction<TtMetalDialect>) {
         match instruction {
-            Instruction::Index(IndexInstruction {
-                list,
-                out,
-                ..
-            }) => {
-                if matches!(list, Variable::GlobalInputArray(_, _) | Variable::GlobalOutputArray(_, _)) {
+            Instruction::Index(IndexInstruction { list, out, .. }) => {
+                if matches!(
+                    list,
+                    Variable::GlobalInputArray(_, _) | Variable::GlobalOutputArray(_, _)
+                ) {
                     let snapshot_name = self.record_snapshot(list, out.item());
                     self.bind(
                         out,
@@ -495,7 +514,10 @@ impl TtWarpLoweringState {
 
 fn tt_source_component_expr(source: &TtWarpSource, lane_expr: &str, comp: usize) -> Option<String> {
     match source {
-        TtWarpSource::Snapshot { snapshot_name, item } => {
+        TtWarpSource::Snapshot {
+            snapshot_name,
+            item,
+        } => {
             if item.vectorization > 1 {
                 Some(format!("{snapshot_name}[{lane_expr}].i_{comp}"))
             } else {
@@ -560,8 +582,12 @@ fn tt_render_reduce(
         let init = tt_source_component_expr(source, "tt_plane_base", comp).unwrap();
         let step = tt_source_component_expr(source, "tt_plane_base + tt_lane", comp).unwrap();
         match reduction_fn {
-            Some(fn_name) => format!("([&]() -> {elem} {{ {elem} acc = {init}; for (uint32_t tt_lane = 1; tt_lane < plane_dim_checked; ++tt_lane) {{ acc = {fn_name}(acc, {step}); }} return acc; }})()"),
-            None => format!("([&]() -> {elem} {{ {elem} acc = {init}; for (uint32_t tt_lane = 1; tt_lane < plane_dim_checked; ++tt_lane) {{ acc {combine} {step}; }} return acc; }})()"),
+            Some(fn_name) => format!(
+                "([&]() -> {elem} {{ {elem} acc = {init}; for (uint32_t tt_lane = 1; tt_lane < plane_dim_checked; ++tt_lane) {{ acc = {fn_name}(acc, {step}); }} return acc; }})()"
+            ),
+            None => format!(
+                "([&]() -> {elem} {{ {elem} acc = {init}; for (uint32_t tt_lane = 1; tt_lane < plane_dim_checked; ++tt_lane) {{ acc {combine} {step}; }} return acc; }})()"
+            ),
         }
     }))
 }
@@ -577,8 +603,14 @@ fn tt_render_prefix_reduce(
     let elem = format!("{}", item.elem());
     Some(tt_render_vector_assignment(out, |comp| {
         let body = tt_source_component_expr(source, "tt_plane_base + tt_lane", comp).unwrap();
-        let cmp = if inclusive { "<= unit_pos_plane" } else { "< unit_pos_plane" };
-        format!("([&]() -> {elem} {{ {elem} acc = {init_value}; for (uint32_t tt_lane = 0; tt_lane < plane_dim_checked; ++tt_lane) {{ if (tt_lane {cmp}) acc {combine} {body}; }} return acc; }})()")
+        let cmp = if inclusive {
+            "<= unit_pos_plane"
+        } else {
+            "< unit_pos_plane"
+        };
+        format!(
+            "([&]() -> {elem} {{ {elem} acc = {init_value}; for (uint32_t tt_lane = 0; tt_lane < plane_dim_checked; ++tt_lane) {{ if (tt_lane {cmp}) acc {combine} {body}; }} return acc; }})()"
+        )
     }))
 }
 
@@ -663,7 +695,10 @@ fn tt_render_warp_instruction(
 fn analyze_tt_warp_lowering(
     instructions: &[Instruction<TtMetalDialect>],
 ) -> (TtWarpLoweringState, Vec<String>) {
-    if !instructions.iter().any(|instruction| matches!(instruction, Instruction::Warp(_))) {
+    if !instructions
+        .iter()
+        .any(|instruction| matches!(instruction, Instruction::Warp(_)))
+    {
         return (
             TtWarpLoweringState::default(),
             instructions.iter().map(render_tt_instruction).collect(),
@@ -709,7 +744,8 @@ pub(crate) fn generate_scalar_writer_source(
     let cube_count_y_idx = num_tiles_idx + 3;
     let cube_count_z_idx = num_tiles_idx + 4;
     let static_arg_offset_words = num_tiles_idx + 5;
-    let dynamic_meta_offset_words = (repr.info.dynamic_meta_offset / core::mem::size_of::<u32>()) as u32;
+    let dynamic_meta_offset_words =
+        (repr.info.dynamic_meta_offset / core::mem::size_of::<u32>()) as u32;
 
     let _ = writeln!(src, "#include <cstdint>\n#include <algorithm>\n");
     let _ = writeln!(src, "using std::max;\nusing std::min;\n");
@@ -767,7 +803,10 @@ pub(crate) fn generate_scalar_writer_source(
         "    constexpr uint32_t cube_dim_z = {};",
         repr.cube_dim.z
     );
-    let _ = writeln!(src, "    uint32_t cube_units = cube_dim_x * cube_dim_y * cube_dim_z;");
+    let _ = writeln!(
+        src,
+        "    uint32_t cube_units = cube_dim_x * cube_dim_y * cube_dim_z;"
+    );
 
     for input_idx in 0..analysis.num_inputs {
         let _ = writeln!(
@@ -837,8 +876,7 @@ pub(crate) fn generate_scalar_writer_source(
         let _ = writeln!(
             src,
             "    const tt_l1_ptr {}* dynamic_meta = reinterpret_cast<tt_l1_ptr const {}*>(get_arg_addr(dynamic_meta_arg_offset_words));",
-            repr.body.address_type,
-            repr.body.address_type,
+            repr.body.address_type, repr.body.address_type,
         );
     }
 
@@ -846,9 +884,7 @@ pub(crate) fn generate_scalar_writer_source(
         let _ = write!(
             src,
             "    const {} arrays_{}[{}] = {{",
-            const_array.item,
-            const_array.index,
-            const_array.size,
+            const_array.item, const_array.index, const_array.size,
         );
         let item = const_array.item;
         for value in const_array.values.iter().copied() {
@@ -865,8 +901,14 @@ pub(crate) fn generate_scalar_writer_source(
         src,
         "\n    for (uint32_t tile_idx = 0; tile_idx < num_tiles; ++tile_idx) {{"
     );
-    let _ = writeln!(src, "        uint32_t tile_start_unit = tile_idx * tile_units;");
-    let _ = writeln!(src, "        uint32_t tile_unit_count = num_units > tile_start_unit ? std::min(tile_units, num_units - tile_start_unit) : 0;");
+    let _ = writeln!(
+        src,
+        "        uint32_t tile_start_unit = tile_idx * tile_units;"
+    );
+    let _ = writeln!(
+        src,
+        "        uint32_t tile_unit_count = num_units > tile_start_unit ? std::min(tile_units, num_units - tile_start_unit) : 0;"
+    );
     for input_idx in 0..analysis.num_inputs {
         let _ = writeln!(src, "        cb_wait_front(cb_in{input_idx}, 1);");
     }
@@ -932,9 +974,20 @@ pub(crate) fn generate_scalar_writer_source(
     let (warp_lowering, rendered_instructions) = analyze_tt_warp_lowering(&repr.body.instructions);
     emit_shared_memory_declarations(&mut src, repr);
     for snapshot in &warp_lowering.snapshots {
-        let _ = writeln!(src, "        {} {}[tile_units];", snapshot.item, snapshot.snapshot_name);
-        let _ = writeln!(src, "        for (uint32_t tt_snapshot_i = 0; tt_snapshot_i < tile_unit_count; ++tt_snapshot_i) {{");
-        let _ = writeln!(src, "            {}[tt_snapshot_i] = {}[tt_snapshot_i];", snapshot.snapshot_name, snapshot.buffer_name);
+        let _ = writeln!(
+            src,
+            "        {} {}[tile_units];",
+            snapshot.item, snapshot.snapshot_name
+        );
+        let _ = writeln!(
+            src,
+            "        for (uint32_t tt_snapshot_i = 0; tt_snapshot_i < tile_unit_count; ++tt_snapshot_i) {{"
+        );
+        let _ = writeln!(
+            src,
+            "            {}[tt_snapshot_i] = {}[tt_snapshot_i];",
+            snapshot.snapshot_name, snapshot.buffer_name
+        );
         let _ = writeln!(src, "        }}");
     }
     let _ = writeln!(
@@ -1052,7 +1105,11 @@ fn render_tt_barrier_op(barrier_op: &BarrierOps<TtMetalDialect>) -> String {
 
 fn emit_local_array_declarations(src: &mut String, repr: &ComputeKernel<TtMetalDialect>) {
     for array in &repr.body.local_arrays {
-        let _ = writeln!(src, "            {} l_arr_{}[{}];", array.item, array.index, array.size);
+        let _ = writeln!(
+            src,
+            "            {} l_arr_{}[{}];",
+            array.item, array.index, array.size
+        );
     }
 }
 
@@ -1078,10 +1135,7 @@ fn emit_shared_memory_declarations(src: &mut String, repr: &ComputeKernel<TtMeta
                 );
             }
             shared::SharedMemory::Value {
-                index,
-                item,
-                align,
-                ..
+                index, item, align, ..
             } => {
                 let size_bytes = item.size();
                 let align = (*align).max(1);
@@ -1089,7 +1143,10 @@ fn emit_shared_memory_declarations(src: &mut String, repr: &ComputeKernel<TtMeta
                     src,
                     "        // TT shared scratch value size: {size_bytes} bytes"
                 );
-                let _ = writeln!(src, "        alignas({align}) {item} shared_memory_{index};");
+                let _ = writeln!(
+                    src,
+                    "        alignas({align}) {item} shared_memory_{index};"
+                );
             }
         }
     }
@@ -1107,18 +1164,45 @@ fn emit_builtin_locals(src: &mut String, indexes: &crate::shared::CubeIndexFlags
         || indexes.plane_pos;
 
     if needs_flattened_positions {
-        let _ = writeln!(src, "            uint32_t cube_units = cube_dim_x * cube_dim_y * cube_dim_z;");
-        let _ = writeln!(src, "            uint32_t flat_cube_pos = cube_units == 0 ? 0 : (unit_idx / cube_units);");
-        let _ = writeln!(src, "            uint32_t unit_pos = cube_units == 0 ? 0 : (unit_idx % cube_units);");
+        let _ = writeln!(
+            src,
+            "            uint32_t cube_units = cube_dim_x * cube_dim_y * cube_dim_z;"
+        );
+        let _ = writeln!(
+            src,
+            "            uint32_t flat_cube_pos = cube_units == 0 ? 0 : (unit_idx / cube_units);"
+        );
+        let _ = writeln!(
+            src,
+            "            uint32_t unit_pos = cube_units == 0 ? 0 : (unit_idx % cube_units);"
+        );
     }
 
     if needs_cube_pos_components || needs_unit_pos_components {
-        let _ = writeln!(src, "            uint32_t cube_pos_x = cube_count_x == 0 ? 0 : (flat_cube_pos % cube_count_x);");
-        let _ = writeln!(src, "            uint32_t cube_pos_y = (cube_count_x == 0 || cube_count_y == 0) ? 0 : ((flat_cube_pos / cube_count_x) % cube_count_y);");
-        let _ = writeln!(src, "            uint32_t cube_pos_z = (cube_count_x == 0 || cube_count_y == 0) ? 0 : (flat_cube_pos / (cube_count_x * cube_count_y));");
-        let _ = writeln!(src, "            uint32_t unit_pos_x = cube_dim_x == 0 ? 0 : (unit_pos % cube_dim_x);");
-        let _ = writeln!(src, "            uint32_t unit_pos_y = (cube_dim_x == 0 || cube_dim_y == 0) ? 0 : ((unit_pos / cube_dim_x) % cube_dim_y);");
-        let _ = writeln!(src, "            uint32_t unit_pos_z = (cube_dim_x == 0 || cube_dim_y == 0) ? 0 : (unit_pos / (cube_dim_x * cube_dim_y));");
+        let _ = writeln!(
+            src,
+            "            uint32_t cube_pos_x = cube_count_x == 0 ? 0 : (flat_cube_pos % cube_count_x);"
+        );
+        let _ = writeln!(
+            src,
+            "            uint32_t cube_pos_y = (cube_count_x == 0 || cube_count_y == 0) ? 0 : ((flat_cube_pos / cube_count_x) % cube_count_y);"
+        );
+        let _ = writeln!(
+            src,
+            "            uint32_t cube_pos_z = (cube_count_x == 0 || cube_count_y == 0) ? 0 : (flat_cube_pos / (cube_count_x * cube_count_y));"
+        );
+        let _ = writeln!(
+            src,
+            "            uint32_t unit_pos_x = cube_dim_x == 0 ? 0 : (unit_pos % cube_dim_x);"
+        );
+        let _ = writeln!(
+            src,
+            "            uint32_t unit_pos_y = (cube_dim_x == 0 || cube_dim_y == 0) ? 0 : ((unit_pos / cube_dim_x) % cube_dim_y);"
+        );
+        let _ = writeln!(
+            src,
+            "            uint32_t unit_pos_z = (cube_dim_x == 0 || cube_dim_y == 0) ? 0 : (unit_pos / (cube_dim_x * cube_dim_y));"
+        );
     }
     if indexes.absolute_pos {
         let _ = writeln!(src, "            uint32_t absolute_pos = unit_idx;");
@@ -1143,8 +1227,14 @@ fn emit_builtin_locals(src: &mut String, indexes: &crate::shared::CubeIndexFlags
     }
     if indexes.unit_pos_plane || indexes.plane_dim_checked || indexes.plane_pos {
         let _ = writeln!(src, "            uint32_t unit_pos_plane = unit_pos % 32;");
-        let _ = writeln!(src, "            uint32_t tt_plane_base = i - unit_pos_plane;");
-        let _ = writeln!(src, "            uint32_t tt_plane_remaining = tile_unit_count > tt_plane_base ? (tile_unit_count - tt_plane_base) : 0;");
+        let _ = writeln!(
+            src,
+            "            uint32_t tt_plane_base = i - unit_pos_plane;"
+        );
+        let _ = writeln!(
+            src,
+            "            uint32_t tt_plane_remaining = tile_unit_count > tt_plane_base ? (tile_unit_count - tt_plane_base) : 0;"
+        );
     }
     if indexes.plane_dim_checked {
         let _ = writeln!(
@@ -1190,14 +1280,22 @@ fn scalar_writer_vectorized_definitions(
             if !emitted.insert(item_name.clone()) {
                 continue;
             }
-            write!(f, "
-struct alignas({alignment}) {item_name} {{")?;
+            write!(
+                f,
+                "
+struct alignas({alignment}) {item_name} {{"
+            )?;
             for i in 0..size {
-                write!(f, "
-    {elem} i_{i};")?;
+                write!(
+                    f,
+                    "
+    {elem} i_{i};"
+                )?;
             }
-            f.write_str("
-};")?;
+            f.write_str(
+                "
+};",
+            )?;
         }
     }
     Ok(())

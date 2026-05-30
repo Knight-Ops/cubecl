@@ -19,11 +19,11 @@ mod tests {
     use crate::compute::stream::TtStreamBackend;
     use crate::runtime::{TtCompiler, get_mesh, tt_memory_properties};
     use cubecl::prelude::*;
-    use cubecl_core::ir::{BarrierLevel, OpaqueType, features::TypeUsage};
     use cubecl_core as cubecl;
     use cubecl_core::Runtime;
-    use cubecl_cpp::tt_metal::kernel::{TtBinaryComputeOp, TtUnaryComputeOp};
+    use cubecl_core::ir::{BarrierLevel, OpaqueType, features::TypeUsage};
     use cubecl_cpp::tt_metal::TtKernelSources;
+    use cubecl_cpp::tt_metal::kernel::{TtBinaryComputeOp, TtUnaryComputeOp};
     use cubecl_runtime::compiler::{CompilationError, Compiler, CubeTask};
     use cubecl_runtime::id::KernelId;
     use cubecl_runtime::kernel::{CompiledKernel, KernelMetadata};
@@ -142,9 +142,7 @@ stderr:
         {
             panic!(
                 "identity matrices are not equal: first mismatch at index {} (expected {}, got {})",
-                mismatch,
-                expected[mismatch],
-                actual[mismatch]
+                mismatch, expected[mismatch], actual[mismatch]
             );
         }
     }
@@ -180,7 +178,7 @@ stderr:
     //   are still unmodeled), `unary` (scalar plus vectorized-2/vectorized-4/vectorized-8/vectorized-16
     //   logical-BF16 and logical-F32 `abs`, `sqrt`, `inverse_sqrt`, `sin`, `cos`, `tan`, `tanh`,
     //   `exp`, and `log` through the TT-native tiled path), `vector` (index, index-assign, loop-unroll,
-    //   conditional, comparison, and the single-unit scratch/shared-layout `test_shared_memory` slice)
+    //   conditional, comparison, and the single-unit scratch/shared-layout `test_shared_memory` slice), `stream` (the reduced and medium cross-stream TT-local wrappers are now green on hardware after fixing cross-stream resource ownership; the full upstream-sized stream workload still stalls and remains blocked)
     // - queued after the current baseline: broader `binary`, broader `unary`, and wider
     //   `topology` / `tensor` parity beyond the current TT-local 2D and multi-cube-count decomposition subset
     //   the BF16/F32 native wrapper path is now green through vec16, while TT-native block-float
@@ -192,7 +190,7 @@ stderr:
     // - control-flow/shared-memory bring-up after the current baseline: broader shared-memory
     //   vector semantics and synchronization semantics beyond the current proven shared-scratch barrier subset
     // - parity lane / capability-blocked: `all_reduce` (single-device identity semantics are now implemented and hardware-validated for both in-place and out-of-place TT runtime calls, and the upstream wrapper stays hardware-clean in the current 1-device environment, but true collective parity is still unverified until 2+ TT devices are available), `cluster`,
-    //   `cmma`, `stream`, `tensormap`, and the remaining
+    //   `cmma`, `stream` (reduced and medium cross-stream slices are green on hardware after the owner-stream fix, but the full upstream-sized workload is still too expensive on the current TT generic path to claim parity), `tensormap`, and the remaining
     //   plane/subgroup-dependent `synchronization` surface beyond the current cube-level subset plus multi-device collective parity
     // - helper-only inventory entry: `traits`
     mod cubecl_std_wrappers {
@@ -231,8 +229,7 @@ stderr:
                     2,
                 );
                 cubecl_std::tests::reinterpret_slice::run_test_write_global::<TestRuntime>(
-                    client,
-                    4,
+                    client, 4,
                 );
             });
         }
@@ -258,31 +255,28 @@ stderr:
         #[test]
         fn quantized_view_per_tensor_int_suite() {
             with_tt_hardware_test_client(|client| {
-                cubecl_std::tests::view::quantized::test_quantized_per_tensor_int::<
-                    TestRuntime,
-                    f32,
-                >(client.clone(), 1);
-                cubecl_std::tests::view::quantized::test_quantized_per_tensor_int::<
-                    TestRuntime,
-                    f32,
-                >(client, 2);
+                cubecl_std::tests::view::quantized::test_quantized_per_tensor_int::<TestRuntime, f32>(
+                    client.clone(),
+                    1,
+                );
+                cubecl_std::tests::view::quantized::test_quantized_per_tensor_int::<TestRuntime, f32>(
+                    client, 2,
+                );
             });
         }
 
         #[test]
         fn quantized_view_per_tensor_fp4_suite() {
             with_tt_hardware_test_client(|client| {
-                cubecl_std::tests::view::quantized::test_quantized_per_tensor_fp4::<
-                    TestRuntime,
-                    f32,
-                >(client.clone(), 1);
-                cubecl_std::tests::view::quantized::test_quantized_per_tensor_fp4::<
-                    TestRuntime,
-                    f32,
-                >(client, 2);
+                cubecl_std::tests::view::quantized::test_quantized_per_tensor_fp4::<TestRuntime, f32>(
+                    client.clone(),
+                    1,
+                );
+                cubecl_std::tests::view::quantized::test_quantized_per_tensor_fp4::<TestRuntime, f32>(
+                    client, 2,
+                );
             });
         }
-
     }
 
     // Phase 4 uses TT-local wrappers around upstream core runtime tests instead
@@ -297,28 +291,27 @@ stderr:
             #[test]
             fn test_kernel_with_generics() {
                 with_tt_hardware_test_client(|client| {
-                    cubecl_core::runtime_tests::launch::test_kernel_with_generics::<
-                        TestRuntime,
-                        f32,
-                    >(client);
+                    cubecl_core::runtime_tests::launch::test_kernel_with_generics::<TestRuntime, f32>(
+                        client,
+                    );
                 });
             }
 
             #[test]
             fn test_kernel_without_generics() {
                 with_tt_hardware_test_client(|client| {
-                    cubecl_core::runtime_tests::launch::test_kernel_without_generics::<
-                        TestRuntime,
-                    >(client);
+                    cubecl_core::runtime_tests::launch::test_kernel_without_generics::<TestRuntime>(
+                        client,
+                    );
                 });
             }
 
             #[test]
             fn test_kernel_with_comptime_tag() {
                 with_tt_hardware_test_client(|client| {
-                    cubecl_core::runtime_tests::launch::test_kernel_with_comptime_tag::<
-                        TestRuntime,
-                    >(client);
+                    cubecl_core::runtime_tests::launch::test_kernel_with_comptime_tag::<TestRuntime>(
+                        client,
+                    );
                 });
             }
         }
@@ -329,18 +322,20 @@ stderr:
             #[test]
             fn test_dynamic_addressing_32() {
                 with_tt_hardware_test_client(|client| {
-                    cubecl_core::runtime_tests::launch::test_kernel_dynamic_addressing::<
-                        TestRuntime,
-                    >(client, AddressType::U32);
+                    cubecl_core::runtime_tests::launch::test_kernel_dynamic_addressing::<TestRuntime>(
+                        client,
+                        AddressType::U32,
+                    );
                 });
             }
 
             #[test]
             fn test_dynamic_addressing_64() {
                 with_tt_hardware_test_client(|client| {
-                    cubecl_core::runtime_tests::launch::test_kernel_dynamic_addressing::<
-                        TestRuntime,
-                    >(client, AddressType::U64);
+                    cubecl_core::runtime_tests::launch::test_kernel_dynamic_addressing::<TestRuntime>(
+                        client,
+                        AddressType::U64,
+                    );
                 });
             }
         }
@@ -446,7 +441,9 @@ stderr:
             #[test]
             fn test_tensor_coordinate() {
                 with_tt_hardware_test_client(|client| {
-                    cubecl_core::runtime_tests::tensor::test_tensor_coordinate::<TestRuntime>(client);
+                    cubecl_core::runtime_tests::tensor::test_tensor_coordinate::<TestRuntime>(
+                        client,
+                    );
                 });
             }
         }
@@ -478,24 +475,28 @@ stderr:
                         client.clone(),
                         AddressType::U64,
                     );
-                    cubecl_core::runtime_tests::metadata::test_shape_different_ranks::<
-                        TestRuntime,
-                    >(client.clone(), AddressType::U32);
-                    cubecl_core::runtime_tests::metadata::test_shape_different_ranks::<
-                        TestRuntime,
-                    >(client, AddressType::U64);
+                    cubecl_core::runtime_tests::metadata::test_shape_different_ranks::<TestRuntime>(
+                        client.clone(),
+                        AddressType::U32,
+                    );
+                    cubecl_core::runtime_tests::metadata::test_shape_different_ranks::<TestRuntime>(
+                        client,
+                        AddressType::U64,
+                    );
                 });
             }
 
             #[test]
             fn test_stride() {
                 with_tt_hardware_test_client(|client| {
-                    cubecl_core::runtime_tests::metadata::test_stride_different_ranks::<
-                        TestRuntime,
-                    >(client.clone(), AddressType::U32);
-                    cubecl_core::runtime_tests::metadata::test_stride_different_ranks::<
-                        TestRuntime,
-                    >(client, AddressType::U64);
+                    cubecl_core::runtime_tests::metadata::test_stride_different_ranks::<TestRuntime>(
+                        client.clone(),
+                        AddressType::U32,
+                    );
+                    cubecl_core::runtime_tests::metadata::test_stride_different_ranks::<TestRuntime>(
+                        client,
+                        AddressType::U64,
+                    );
                 });
             }
 
@@ -528,12 +529,14 @@ stderr:
             #[test]
             fn test_buffer_len_vectorized() {
                 with_tt_hardware_test_client(|client| {
-                    cubecl_core::runtime_tests::metadata::test_buffer_len_vectorized::<
-                        TestRuntime,
-                    >(client.clone(), AddressType::U32);
-                    cubecl_core::runtime_tests::metadata::test_buffer_len_vectorized::<
-                        TestRuntime,
-                    >(client, AddressType::U64);
+                    cubecl_core::runtime_tests::metadata::test_buffer_len_vectorized::<TestRuntime>(
+                        client.clone(),
+                        AddressType::U32,
+                    );
+                    cubecl_core::runtime_tests::metadata::test_buffer_len_vectorized::<TestRuntime>(
+                        client,
+                        AddressType::U64,
+                    );
                 });
             }
 
@@ -582,10 +585,9 @@ stderr:
             #[test]
             fn test_assign_scalar() {
                 with_tt_hardware_test_client(|client| {
-                    cubecl_core::runtime_tests::assign::test_kernel_assign_scalar::<
-                        TestRuntime,
-                        f32,
-                    >(client);
+                    cubecl_core::runtime_tests::assign::test_kernel_assign_scalar::<TestRuntime, f32>(
+                        client,
+                    );
                 });
             }
 
@@ -640,28 +642,36 @@ stderr:
             #[test]
             fn test_switch_statement() {
                 with_tt_hardware_test_client(|client| {
-                    cubecl_core::runtime_tests::branch::test_switch_statement::<TestRuntime, f32>(client);
+                    cubecl_core::runtime_tests::branch::test_switch_statement::<TestRuntime, f32>(
+                        client,
+                    );
                 });
             }
 
             #[test]
             fn test_switch_used_as_value() {
                 with_tt_hardware_test_client(|client| {
-                    cubecl_core::runtime_tests::branch::test_switch_used_as_value::<TestRuntime, f32>(client);
+                    cubecl_core::runtime_tests::branch::test_switch_used_as_value::<TestRuntime, f32>(
+                        client,
+                    );
                 });
             }
 
             #[test]
             fn test_switch_default() {
                 with_tt_hardware_test_client(|client| {
-                    cubecl_core::runtime_tests::branch::test_switch_default::<TestRuntime, f32>(client);
+                    cubecl_core::runtime_tests::branch::test_switch_default::<TestRuntime, f32>(
+                        client,
+                    );
                 });
             }
 
             #[test]
             fn test_switch_or_branch() {
                 with_tt_hardware_test_client(|client| {
-                    cubecl_core::runtime_tests::branch::test_switch_or_branch::<TestRuntime, f32>(client);
+                    cubecl_core::runtime_tests::branch::test_switch_or_branch::<TestRuntime, f32>(
+                        client,
+                    );
                 });
             }
 
@@ -686,14 +696,18 @@ stderr:
             #[test]
             fn test_switch_const() {
                 with_tt_hardware_test_client(|client| {
-                    cubecl_core::runtime_tests::branch::test_switch_const::<TestRuntime, f32>(client);
+                    cubecl_core::runtime_tests::branch::test_switch_const::<TestRuntime, f32>(
+                        client,
+                    );
                 });
             }
 
             #[test]
             fn test_for_loop_with_break() {
                 with_tt_hardware_test_client(|client| {
-                    cubecl_core::runtime_tests::branch::test_for_loop_with_break::<TestRuntime, f32>(client);
+                    cubecl_core::runtime_tests::branch::test_for_loop_with_break::<TestRuntime, f32>(
+                        client,
+                    );
                 });
             }
         }
@@ -704,10 +718,9 @@ stderr:
             #[test]
             fn test_assign_index() {
                 with_tt_hardware_test_client(|client| {
-                    cubecl_core::runtime_tests::index::test_kernel_index_scalar::<
-                        TestRuntime,
-                        f32,
-                    >(client);
+                    cubecl_core::runtime_tests::index::test_kernel_index_scalar::<TestRuntime, f32>(
+                        client,
+                    );
                 });
             }
 
@@ -828,14 +841,18 @@ stderr:
             #[test]
             fn test_sequence_for_loop() {
                 with_tt_hardware_test_client(|client| {
-                    cubecl_core::runtime_tests::sequence::test_sequence_for_loop::<TestRuntime, f32>(client);
+                    cubecl_core::runtime_tests::sequence::test_sequence_for_loop::<TestRuntime, f32>(
+                        client,
+                    );
                 });
             }
 
             #[test]
             fn test_sequence_index() {
                 with_tt_hardware_test_client(|client| {
-                    cubecl_core::runtime_tests::sequence::test_sequence_index::<TestRuntime, f32>(client);
+                    cubecl_core::runtime_tests::sequence::test_sequence_index::<TestRuntime, f32>(
+                        client,
+                    );
                 });
             }
         }
@@ -853,7 +870,9 @@ stderr:
             #[test]
             fn test_unroll_load_store() {
                 with_tt_hardware_test_client(|client| {
-                    cubecl_core::runtime_tests::unroll::test_unroll_load_store::<TestRuntime, f32>(client);
+                    cubecl_core::runtime_tests::unroll::test_unroll_load_store::<TestRuntime, f32>(
+                        client,
+                    );
                 });
             }
         }
@@ -899,7 +918,6 @@ stderr:
                     cubecl_core::runtime_tests::slice::test_slice_mut_len::<TestRuntime>(client);
                 });
             }
-
         }
 
         mod saturating {
@@ -972,10 +990,7 @@ stderr:
                         client.clone(),
                         2,
                     );
-                    cubecl_core::runtime_tests::minifloat::test_fp8::<TestRuntime, f32>(
-                        client,
-                        4,
-                    );
+                    cubecl_core::runtime_tests::minifloat::test_fp8::<TestRuntime, f32>(client, 4);
                 });
             }
 
@@ -990,10 +1005,7 @@ stderr:
                         client.clone(),
                         2,
                     );
-                    cubecl_core::runtime_tests::minifloat::test_fp6::<TestRuntime, f32>(
-                        client,
-                        4,
-                    );
+                    cubecl_core::runtime_tests::minifloat::test_fp6::<TestRuntime, f32>(client, 4);
                 });
             }
 
@@ -1004,10 +1016,7 @@ stderr:
                         client.clone(),
                         2,
                     );
-                    cubecl_core::runtime_tests::minifloat::test_fp4::<TestRuntime, f32>(
-                        client,
-                        4,
-                    );
+                    cubecl_core::runtime_tests::minifloat::test_fp4::<TestRuntime, f32>(client, 4);
                 });
             }
 
@@ -1033,91 +1042,117 @@ stderr:
             #[test]
             fn test_regression_issue_1218() {
                 with_tt_hardware_test_client(|client| {
-                    cubecl_core::runtime_tests::atomic::test_regression_issue_1218::<TestRuntime>(client.clone());
+                    cubecl_core::runtime_tests::atomic::test_regression_issue_1218::<TestRuntime>(
+                        client.clone(),
+                    );
                 });
             }
 
             #[test]
             fn test_atomic_add_int() {
                 with_tt_hardware_test_client(|client| {
-                    cubecl_core::runtime_tests::atomic::test_kernel_atomic_add::<TestRuntime, u32>(client, 1);
+                    cubecl_core::runtime_tests::atomic::test_kernel_atomic_add::<TestRuntime, u32>(
+                        client, 1,
+                    );
                 });
             }
 
             #[test]
             fn test_atomic_min_int() {
                 with_tt_hardware_test_client(|client| {
-                    cubecl_core::runtime_tests::atomic::test_kernel_atomic_min::<TestRuntime, i32>(client, 1);
+                    cubecl_core::runtime_tests::atomic::test_kernel_atomic_min::<TestRuntime, i32>(
+                        client, 1,
+                    );
                 });
             }
 
             #[test]
             fn test_atomic_max_int() {
                 with_tt_hardware_test_client(|client| {
-                    cubecl_core::runtime_tests::atomic::test_kernel_atomic_max::<TestRuntime, i32>(client, 1);
+                    cubecl_core::runtime_tests::atomic::test_kernel_atomic_max::<TestRuntime, i32>(
+                        client, 1,
+                    );
                 });
             }
 
             #[test]
             fn test_atomic_add_float() {
                 with_tt_hardware_test_client(|client| {
-                    cubecl_core::runtime_tests::atomic::test_kernel_atomic_add::<TestRuntime, f32>(client, 1);
+                    cubecl_core::runtime_tests::atomic::test_kernel_atomic_add::<TestRuntime, f32>(
+                        client, 1,
+                    );
                 });
             }
 
             #[test]
             fn test_atomic_add_float_vec2() {
                 with_tt_hardware_test_client(|client| {
-                    cubecl_core::runtime_tests::atomic::test_kernel_atomic_add::<TestRuntime, f32>(client, 2);
+                    cubecl_core::runtime_tests::atomic::test_kernel_atomic_add::<TestRuntime, f32>(
+                        client, 2,
+                    );
                 });
             }
 
             #[test]
             fn test_atomic_add_float_vec4() {
                 with_tt_hardware_test_client(|client| {
-                    cubecl_core::runtime_tests::atomic::test_kernel_atomic_add::<TestRuntime, f32>(client, 4);
+                    cubecl_core::runtime_tests::atomic::test_kernel_atomic_add::<TestRuntime, f32>(
+                        client, 4,
+                    );
                 });
             }
 
             #[test]
             fn test_atomic_min_float() {
                 with_tt_hardware_test_client(|client| {
-                    cubecl_core::runtime_tests::atomic::test_kernel_atomic_min::<TestRuntime, f32>(client, 1);
+                    cubecl_core::runtime_tests::atomic::test_kernel_atomic_min::<TestRuntime, f32>(
+                        client, 1,
+                    );
                 });
             }
 
             #[test]
             fn test_atomic_min_float_vec2() {
                 with_tt_hardware_test_client(|client| {
-                    cubecl_core::runtime_tests::atomic::test_kernel_atomic_min::<TestRuntime, f32>(client, 2);
+                    cubecl_core::runtime_tests::atomic::test_kernel_atomic_min::<TestRuntime, f32>(
+                        client, 2,
+                    );
                 });
             }
 
             #[test]
             fn test_atomic_min_float_vec4() {
                 with_tt_hardware_test_client(|client| {
-                    cubecl_core::runtime_tests::atomic::test_kernel_atomic_min::<TestRuntime, f32>(client, 4);
+                    cubecl_core::runtime_tests::atomic::test_kernel_atomic_min::<TestRuntime, f32>(
+                        client, 4,
+                    );
                 });
             }
 
             #[test]
             fn test_atomic_max_float() {
                 with_tt_hardware_test_client(|client| {
-                    cubecl_core::runtime_tests::atomic::test_kernel_atomic_max::<TestRuntime, f32>(client, 1);
+                    cubecl_core::runtime_tests::atomic::test_kernel_atomic_max::<TestRuntime, f32>(
+                        client, 1,
+                    );
                 });
             }
 
             #[test]
             fn test_atomic_max_float_vec2() {
                 with_tt_hardware_test_client(|client| {
-                    cubecl_core::runtime_tests::atomic::test_kernel_atomic_max::<TestRuntime, f32>(client, 2);
+                    cubecl_core::runtime_tests::atomic::test_kernel_atomic_max::<TestRuntime, f32>(
+                        client, 2,
+                    );
                 });
             }
 
             #[test]
             fn test_atomic_max_float_vec4() {
                 with_tt_hardware_test_client(|client| {
-                    cubecl_core::runtime_tests::atomic::test_kernel_atomic_max::<TestRuntime, f32>(client, 4);
+                    cubecl_core::runtime_tests::atomic::test_kernel_atomic_max::<TestRuntime, f32>(
+                        client, 4,
+                    );
                 });
             }
         }
@@ -1128,28 +1163,54 @@ stderr:
             #[test]
             fn test_barrier_async_copy() {
                 with_tt_hardware_test_client(|client| {
-                    cubecl_core::runtime_tests::barrier::test_async_copy::<TestRuntime, f32>(client);
+                    cubecl_core::runtime_tests::barrier::test_async_copy::<TestRuntime, f32>(
+                        client,
+                    );
                 });
             }
 
             #[test]
             fn test_barrier_memcpy_async_one_load() {
                 with_tt_hardware_test_client(|client| {
-                    cubecl_core::runtime_tests::barrier::test_memcpy_one_load::<TestRuntime, f32>(client);
+                    cubecl_core::runtime_tests::barrier::test_memcpy_one_load::<TestRuntime, f32>(
+                        client,
+                    );
                 });
             }
 
             #[test]
             fn test_barrier_memcpy_async_two_loads() {
                 with_tt_hardware_test_client(|client| {
-                    cubecl_core::runtime_tests::barrier::test_memcpy_two_loads::<TestRuntime, f32>(false, client);
+                    cubecl_core::runtime_tests::barrier::test_memcpy_two_loads::<TestRuntime, f32>(
+                        false, client,
+                    );
                 });
             }
 
             #[test]
             fn test_barrier_memcpy_async_two_independent_loads() {
                 with_tt_hardware_test_client(|client| {
-                    cubecl_core::runtime_tests::barrier::test_memcpy_two_loads::<TestRuntime, f32>(true, client);
+                    cubecl_core::runtime_tests::barrier::test_memcpy_two_loads::<TestRuntime, f32>(
+                        true, client,
+                    );
+                });
+            }
+        }
+
+        mod stream {
+            use super::*;
+
+            #[test]
+            fn test_stream_small() {
+                with_tt_hardware_test_client(|client| {
+                    cubecl_core::runtime_tests::stream::test_stream_small::<TestRuntime>(client);
+                });
+            }
+
+            #[test]
+            fn test_stream_medium() {
+                with_tt_hardware_test_client(|client| {
+                    cubecl_core::runtime_tests::stream::test_stream_medium::<TestRuntime>(client);
                 });
             }
         }
@@ -1160,28 +1221,36 @@ stderr:
             #[test]
             fn test_sync_cube() {
                 with_tt_hardware_test_client(|client| {
-                    cubecl_core::runtime_tests::synchronization::test_sync_cube::<TestRuntime>(client);
+                    cubecl_core::runtime_tests::synchronization::test_sync_cube::<TestRuntime>(
+                        client,
+                    );
                 });
             }
 
             #[test]
             fn test_finished_sync_cube() {
                 with_tt_hardware_test_client(|client| {
-                    cubecl_core::runtime_tests::synchronization::test_finished_sync_cube::<TestRuntime>(client);
+                    cubecl_core::runtime_tests::synchronization::test_finished_sync_cube::<
+                        TestRuntime,
+                    >(client);
                 });
             }
 
             #[test]
             fn test_sync_cube_shared() {
                 with_tt_hardware_test_client(|client| {
-                    cubecl_core::runtime_tests::synchronization::test_sync_cube_shared::<TestRuntime>(client);
+                    cubecl_core::runtime_tests::synchronization::test_sync_cube_shared::<TestRuntime>(
+                        client,
+                    );
                 });
             }
 
             #[test]
             fn test_sync_plane() {
                 with_tt_hardware_test_client(|client| {
-                    cubecl_core::runtime_tests::synchronization::test_sync_plane::<TestRuntime>(client);
+                    cubecl_core::runtime_tests::synchronization::test_sync_plane::<TestRuntime>(
+                        client,
+                    );
                 });
             }
         }
@@ -1443,7 +1512,6 @@ stderr:
                 out[20] += 1.0f32;
             }
         }
-
 
         #[cube(launch)]
         fn tt_plane_sum_vec_kernel<N: Size>(out: &mut Array<Vector<f32, N>>) {
@@ -1722,7 +1790,6 @@ stderr:
                 .collect()
         }
 
-
         fn plane_vector_input(vectorization: usize) -> Vec<f32> {
             (0..32 * vectorization).map(|x| x as f32).collect()
         }
@@ -1875,7 +1942,6 @@ stderr:
                     });
                 });
             }
-
 
             #[test]
             fn test_plane_sum_vec1() {
@@ -2669,7 +2735,9 @@ stderr:
                     #[test]
                     fn $name() {
                         with_tt_hardware_test_client(|client| {
-                            cubecl_core::runtime_tests::plane::$func::<TestRuntime, f32>(client, $vec);
+                            cubecl_core::runtime_tests::plane::$func::<TestRuntime, f32>(
+                                client, $vec,
+                            );
                         });
                     }
                 };
@@ -2689,21 +2757,69 @@ stderr:
             plane_vec_test!(upstream_plane_sum_vec1, test_plane_sum, 1);
             plane_vec_test!(upstream_plane_sum_vec2, test_plane_sum, 2);
             plane_vec_test!(upstream_plane_sum_vec4, test_plane_sum, 4);
-            plane_vec_test!(upstream_plane_inclusive_sum_vec1, test_plane_inclusive_sum, 1);
-            plane_vec_test!(upstream_plane_inclusive_sum_vec2, test_plane_inclusive_sum, 2);
-            plane_vec_test!(upstream_plane_inclusive_sum_vec4, test_plane_inclusive_sum, 4);
-            plane_vec_test!(upstream_plane_exclusive_sum_vec1, test_plane_exclusive_sum, 1);
-            plane_vec_test!(upstream_plane_exclusive_sum_vec2, test_plane_exclusive_sum, 2);
-            plane_vec_test!(upstream_plane_exclusive_sum_vec4, test_plane_exclusive_sum, 4);
+            plane_vec_test!(
+                upstream_plane_inclusive_sum_vec1,
+                test_plane_inclusive_sum,
+                1
+            );
+            plane_vec_test!(
+                upstream_plane_inclusive_sum_vec2,
+                test_plane_inclusive_sum,
+                2
+            );
+            plane_vec_test!(
+                upstream_plane_inclusive_sum_vec4,
+                test_plane_inclusive_sum,
+                4
+            );
+            plane_vec_test!(
+                upstream_plane_exclusive_sum_vec1,
+                test_plane_exclusive_sum,
+                1
+            );
+            plane_vec_test!(
+                upstream_plane_exclusive_sum_vec2,
+                test_plane_exclusive_sum,
+                2
+            );
+            plane_vec_test!(
+                upstream_plane_exclusive_sum_vec4,
+                test_plane_exclusive_sum,
+                4
+            );
             plane_vec_test!(upstream_plane_prod_vec1, test_plane_prod, 1);
             plane_vec_test!(upstream_plane_prod_vec2, test_plane_prod, 2);
             plane_vec_test!(upstream_plane_prod_vec4, test_plane_prod, 4);
-            plane_vec_test!(upstream_plane_inclusive_prod_vec1, test_plane_inclusive_prod, 1);
-            plane_vec_test!(upstream_plane_inclusive_prod_vec2, test_plane_inclusive_prod, 2);
-            plane_vec_test!(upstream_plane_inclusive_prod_vec4, test_plane_inclusive_prod, 4);
-            plane_vec_test!(upstream_plane_exclusive_prod_vec1, test_plane_exclusive_prod, 1);
-            plane_vec_test!(upstream_plane_exclusive_prod_vec2, test_plane_exclusive_prod, 2);
-            plane_vec_test!(upstream_plane_exclusive_prod_vec4, test_plane_exclusive_prod, 4);
+            plane_vec_test!(
+                upstream_plane_inclusive_prod_vec1,
+                test_plane_inclusive_prod,
+                1
+            );
+            plane_vec_test!(
+                upstream_plane_inclusive_prod_vec2,
+                test_plane_inclusive_prod,
+                2
+            );
+            plane_vec_test!(
+                upstream_plane_inclusive_prod_vec4,
+                test_plane_inclusive_prod,
+                4
+            );
+            plane_vec_test!(
+                upstream_plane_exclusive_prod_vec1,
+                test_plane_exclusive_prod,
+                1
+            );
+            plane_vec_test!(
+                upstream_plane_exclusive_prod_vec2,
+                test_plane_exclusive_prod,
+                2
+            );
+            plane_vec_test!(
+                upstream_plane_exclusive_prod_vec4,
+                test_plane_exclusive_prod,
+                4
+            );
             plane_vec_test!(upstream_plane_max_vec1, test_plane_max, 1);
             plane_vec_test!(upstream_plane_max_vec2, test_plane_max, 2);
             plane_vec_test!(upstream_plane_max_vec4, test_plane_max, 4);
@@ -2748,7 +2864,9 @@ stderr:
             #[test]
             fn test_all_reduce_sync_collective() {
                 with_tt_hardware_test(|| {
-                    cubecl_core::runtime_tests::all_reduce::test_all_reduce_sync_collective::<TestRuntime>();
+                    cubecl_core::runtime_tests::all_reduce::test_all_reduce_sync_collective::<
+                        TestRuntime,
+                    >();
                 });
             }
 
@@ -2802,7 +2920,12 @@ stderr:
             use super::*;
             use half::bf16;
 
-            fn run_add_native_case<F: Float + cubecl_core::num_traits::Float + CubeElement + core::fmt::Display>(client: ComputeClient<TestRuntime>, epsilon: f32) {
+            fn run_add_native_case<
+                F: Float + cubecl_core::num_traits::Float + CubeElement + core::fmt::Display,
+            >(
+                client: ComputeClient<TestRuntime>,
+                epsilon: f32,
+            ) {
                 let lhs = cubecl::as_type![F: 1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0];
                 let rhs = cubecl::as_type![F: 0.5, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0];
                 let expected = cubecl::as_type![F: 1.5, 3.0, 6.0, 12.0, 24.0, 48.0, 96.0, 192.0];
@@ -2853,7 +2976,12 @@ stderr:
                 );
             }
 
-            fn run_sub_native_case<F: Float + cubecl_core::num_traits::Float + CubeElement + core::fmt::Display>(client: ComputeClient<TestRuntime>, epsilon: f32) {
+            fn run_sub_native_case<
+                F: Float + cubecl_core::num_traits::Float + CubeElement + core::fmt::Display,
+            >(
+                client: ComputeClient<TestRuntime>,
+                epsilon: f32,
+            ) {
                 let lhs = cubecl::as_type![
                     F: 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0,
                     2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0
@@ -2913,7 +3041,12 @@ stderr:
                 );
             }
 
-            fn run_mul_native_case<F: Float + cubecl_core::num_traits::Float + CubeElement + core::fmt::Display>(client: ComputeClient<TestRuntime>, epsilon: f32) {
+            fn run_mul_native_case<
+                F: Float + cubecl_core::num_traits::Float + CubeElement + core::fmt::Display,
+            >(
+                client: ComputeClient<TestRuntime>,
+                epsilon: f32,
+            ) {
                 let lhs = cubecl::as_type![
                     F: 1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0,
                     1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0
@@ -2973,7 +3106,12 @@ stderr:
                 );
             }
 
-            fn run_div_native_case<F: Float + cubecl_core::num_traits::Float + CubeElement + core::fmt::Display>(client: ComputeClient<TestRuntime>, epsilon: f32) {
+            fn run_div_native_case<
+                F: Float + cubecl_core::num_traits::Float + CubeElement + core::fmt::Display,
+            >(
+                client: ComputeClient<TestRuntime>,
+                epsilon: f32,
+            ) {
                 let lhs = cubecl::as_type![
                     F: 1.0, 3.0, 9.0, 16.0, 25.0, 36.0, 49.0, 64.0,
                     1.0, 3.0, 9.0, 16.0, 25.0, 36.0, 49.0, 64.0
@@ -3092,20 +3230,18 @@ stderr:
             #[test]
             fn test_vector_index_assign() {
                 with_tt_hardware_test_client(|client| {
-                    cubecl_core::runtime_tests::vector::test_vector_index_assign::<
-                        TestRuntime,
-                        f32,
-                    >(client);
+                    cubecl_core::runtime_tests::vector::test_vector_index_assign::<TestRuntime, f32>(
+                        client,
+                    );
                 });
             }
 
             #[test]
             fn test_vector_conditional() {
                 with_tt_hardware_test_client(|client| {
-                    cubecl_core::runtime_tests::vector::test_vector_conditional::<
-                        TestRuntime,
-                        f32,
-                    >(client);
+                    cubecl_core::runtime_tests::vector::test_vector_conditional::<TestRuntime, f32>(
+                        client,
+                    );
                 });
             }
 
@@ -3132,17 +3268,20 @@ stderr:
             #[test]
             fn test_vector_loop_unroll() {
                 with_tt_hardware_test_client(|client| {
-                    cubecl_core::runtime_tests::vector::test_vector_loop_unroll::<TestRuntime, f32>(client);
+                    cubecl_core::runtime_tests::vector::test_vector_loop_unroll::<TestRuntime, f32>(
+                        client,
+                    );
                 });
             }
 
             #[test]
             fn test_shared_memory() {
                 with_tt_hardware_test_client(|client| {
-                    cubecl_core::runtime_tests::vector::test_shared_memory::<TestRuntime, f32>(client);
+                    cubecl_core::runtime_tests::vector::test_shared_memory::<TestRuntime, f32>(
+                        client,
+                    );
                 });
             }
-
         }
 
         mod unary_int {
@@ -3167,9 +3306,7 @@ stderr:
             #[test]
             fn test_count_ones() {
                 with_tt_hardware_test_client(|client| {
-                    cubecl_core::runtime_tests::unary::test_count_ones::<TestRuntime, i32>(
-                        client,
-                    );
+                    cubecl_core::runtime_tests::unary::test_count_ones::<TestRuntime, i32>(client);
                 });
             }
 
@@ -3210,12 +3347,16 @@ stderr:
             }
         }
 
-
         mod unary {
             use super::*;
             use half::bf16;
 
-            fn run_sqrt_native_case<F: Float + cubecl_core::num_traits::Float + CubeElement + core::fmt::Display>(client: ComputeClient<TestRuntime>, epsilon: f32) {
+            fn run_sqrt_native_case<
+                F: Float + cubecl_core::num_traits::Float + CubeElement + core::fmt::Display,
+            >(
+                client: ComputeClient<TestRuntime>,
+                epsilon: f32,
+            ) {
                 let input = cubecl::as_type![
                     F: 0.0, 1.0, 4.0, 9.0, 16.0, 25.0, 36.0, 49.0,
                     64.0, 81.0, 100.0, 121.0, 144.0, 169.0, 196.0, 225.0
@@ -3266,7 +3407,12 @@ stderr:
                 );
             }
 
-            fn run_inverse_sqrt_native_case<F: Float + cubecl_core::num_traits::Float + CubeElement + core::fmt::Display>(client: ComputeClient<TestRuntime>, epsilon: f32) {
+            fn run_inverse_sqrt_native_case<
+                F: Float + cubecl_core::num_traits::Float + CubeElement + core::fmt::Display,
+            >(
+                client: ComputeClient<TestRuntime>,
+                epsilon: f32,
+            ) {
                 let input = cubecl::as_type![
                     F: 1.0, 4.0, 16.0, 0.25, 9.0, 36.0, 49.0, 64.0,
                     81.0, 100.0, 121.0, 144.0, 169.0, 196.0, 225.0, 256.0
@@ -3317,7 +3463,12 @@ stderr:
                 );
             }
 
-            fn run_abs_native_case<F: Float + cubecl_core::num_traits::Float + CubeElement + core::fmt::Display>(client: ComputeClient<TestRuntime>, epsilon: f32) {
+            fn run_abs_native_case<
+                F: Float + cubecl_core::num_traits::Float + CubeElement + core::fmt::Display,
+            >(
+                client: ComputeClient<TestRuntime>,
+                epsilon: f32,
+            ) {
                 let input = cubecl::as_type![
                     F: -1.0, 0.0, 2.0, -3.0, -4.5, 5.5, -6.5, 7.5,
                     -8.5, 9.5, -10.5, 11.5, -12.5, 13.5, -14.5, 15.5
@@ -3368,7 +3519,12 @@ stderr:
                 );
             }
 
-            fn run_sin_native_case<F: Float + cubecl_core::num_traits::Float + CubeElement + core::fmt::Display>(client: ComputeClient<TestRuntime>, epsilon: f32) {
+            fn run_sin_native_case<
+                F: Float + cubecl_core::num_traits::Float + CubeElement + core::fmt::Display,
+            >(
+                client: ComputeClient<TestRuntime>,
+                epsilon: f32,
+            ) {
                 let input = cubecl::as_type![
                     F: 0.0, 1.5707964, 3.1415927, -1.5707964, 0.7853982, -0.7853982, 0.5235988, -0.5235988,
                     1.0471976, -1.0471976, 0.2, -0.2, 0.3, -0.3, 0.9, -0.9
@@ -3419,7 +3575,12 @@ stderr:
                 );
             }
 
-            fn run_cos_native_case<F: Float + cubecl_core::num_traits::Float + CubeElement + core::fmt::Display>(client: ComputeClient<TestRuntime>, epsilon: f32) {
+            fn run_cos_native_case<
+                F: Float + cubecl_core::num_traits::Float + CubeElement + core::fmt::Display,
+            >(
+                client: ComputeClient<TestRuntime>,
+                epsilon: f32,
+            ) {
                 let input = cubecl::as_type![
                     F: 0.0, 1.5707964, 3.1415927, -1.5707964, 0.7853982, -0.7853982, 1.0471976, -1.0471976,
                     0.5235988, -0.5235988, 0.2, -0.2, 0.3, -0.3, 0.9, -0.9
@@ -3470,7 +3631,12 @@ stderr:
                 );
             }
 
-            fn run_tan_native_case<F: Float + cubecl_core::num_traits::Float + CubeElement + core::fmt::Display>(client: ComputeClient<TestRuntime>, epsilon: f32) {
+            fn run_tan_native_case<
+                F: Float + cubecl_core::num_traits::Float + CubeElement + core::fmt::Display,
+            >(
+                client: ComputeClient<TestRuntime>,
+                epsilon: f32,
+            ) {
                 let input = cubecl::as_type![
                     F: 0.0, 0.7853982, 1.0471976, -0.7853982, 0.5235988, -0.5235988, 0.2, -0.2,
                     0.3, -0.3, 0.9, -0.9, 1.1, -1.1, 0.1, -0.1
@@ -3521,7 +3687,12 @@ stderr:
                 );
             }
 
-            fn run_tanh_native_case<F: Float + cubecl_core::num_traits::Float + CubeElement + core::fmt::Display>(client: ComputeClient<TestRuntime>, epsilon: f32) {
+            fn run_tanh_native_case<
+                F: Float + cubecl_core::num_traits::Float + CubeElement + core::fmt::Display,
+            >(
+                client: ComputeClient<TestRuntime>,
+                epsilon: f32,
+            ) {
                 let input = cubecl::as_type![
                     F: 0.0, 1.0, -1.0, 2.0, -2.0, 3.0, -0.5, 0.5,
                     -3.0, 4.0, -4.0, 0.25, -0.25, 1.5, -1.5, 0.75
@@ -3572,7 +3743,12 @@ stderr:
                 );
             }
 
-            fn run_exp_native_case<F: Float + cubecl_core::num_traits::Float + CubeElement + core::fmt::Display>(client: ComputeClient<TestRuntime>, epsilon: f32) {
+            fn run_exp_native_case<
+                F: Float + cubecl_core::num_traits::Float + CubeElement + core::fmt::Display,
+            >(
+                client: ComputeClient<TestRuntime>,
+                epsilon: f32,
+            ) {
                 let input = cubecl::as_type![
                     F: 0.0, 1.0, 2.0, -1.0, -2.0, 1.5, -0.5, 0.5,
                     0.0, 1.0, 2.0, -1.0, -2.0, 1.5, -0.5, 0.5
@@ -3623,7 +3799,12 @@ stderr:
                 );
             }
 
-            fn run_log_native_case<F: Float + cubecl_core::num_traits::Float + CubeElement + core::fmt::Display>(client: ComputeClient<TestRuntime>, epsilon: f32) {
+            fn run_log_native_case<
+                F: Float + cubecl_core::num_traits::Float + CubeElement + core::fmt::Display,
+            >(
+                client: ComputeClient<TestRuntime>,
+                epsilon: f32,
+            ) {
                 let input = cubecl::as_type![
                     F: 1.0, 2.0, 3.0, 10.0, 0.5, 4.0, 16.0, 64.0,
                     5.0, 6.0, 7.0, 8.0, 9.0, 12.0, 24.0, 32.0
@@ -3778,7 +3959,6 @@ stderr:
                 });
             }
         }
-
     }
 
     // cubecl_std::testgen!();
@@ -4016,7 +4196,6 @@ stderr:
             let mut output = vec![0u8; BUF_SIZE as usize];
             mesh.read_mesh_buffer(&buf, &mut output).expect("read");
             assert_eq!(input, output, "raw buffer write/read round-trip");
-    
         });
     }
 
@@ -4041,7 +4220,6 @@ stderr:
                 .expect("logical read should succeed even with padded backing allocation");
             assert_eq!(output.len(), input.len());
             assert_eq!(&output[..], input.as_slice());
-    
         });
     }
 
@@ -4078,9 +4256,12 @@ stderr:
             let stream_id = cubecl_common::stream_id::StreamId::current();
 
             // Compile through the CubeTask pipeline
-            let sources =
-                cubecl_cpp::tt_metal::compile::compile_to_tt_sources(&kernel_def, NUM_TILES, TILE_SIZE)
-                    .expect("compile_to_tt_sources");
+            let sources = cubecl_cpp::tt_metal::compile::compile_to_tt_sources(
+                &kernel_def,
+                NUM_TILES,
+                TILE_SIZE,
+            )
+            .expect("compile_to_tt_sources");
 
             server
                 .launch_from_sources(
@@ -4109,7 +4290,6 @@ stderr:
                 "CubeTask pipeline: {}/{} mismatches",
                 mismatches, num_u16
             );
-    
         });
     }
 
@@ -4204,7 +4384,6 @@ stderr:
                 "copy kernel: {}/{} mismatches",
                 mismatches, num_u16
             );
-    
         });
     }
 
@@ -4236,8 +4415,8 @@ stderr:
             for i in 0..num_elements {
                 input[i] = 0x3E00u16 | (i as u16 & 0xFF);
             }
-            let tilized =
-                libtt_metal_cxx::tilize(bytemuck::cast_slice(&input), M, N, ELEM_SIZE).expect("tilize");
+            let tilized = libtt_metal_cxx::tilize(bytemuck::cast_slice(&input), M, N, ELEM_SIZE)
+                .expect("tilize");
             mesh.write_mesh_buffer(&input_buf, &tilized)
                 .expect("input write");
 
@@ -4306,7 +4485,6 @@ stderr:
                 "tilized copy kernel: {}/{} mismatches",
                 mismatches, num_elements
             );
-    
         });
     }
 
@@ -4317,7 +4495,6 @@ stderr:
                 return;
             }
             run_native_block_float_copy_round_trip("bfp8_b", 6, DataFormat::Bfp8B, 1088);
-
         });
     }
 
@@ -4328,7 +4505,6 @@ stderr:
                 return;
             }
             run_native_block_float_copy_round_trip("bfp4_b", 7, DataFormat::Bfp4B, 576);
-
         });
     }
 
@@ -4768,7 +4944,6 @@ stderr:
         });
     }
 
-
     #[test]
     fn kernel_bfp8b_binary_wrapper_suite() {
         with_tt_hardware_test(|| {
@@ -4835,7 +5010,6 @@ stderr:
     // in the live suite through the semantic model below. Remaining work here is mainly
     // wrapper-level promotion, downstream integration, and the still-blocked `Bfp2_b` path.
 
-
     fn block_float_pattern(len: usize) -> Vec<f32> {
         const PATTERN: [f32; 8] = [-2.0, -1.0, -0.5, 0.0, 0.5, 1.0, 2.0, 4.0];
         (0..len).map(|i| PATTERN[i % PATTERN.len()]).collect()
@@ -4852,14 +5026,8 @@ stderr:
                 }
             })
             .collect();
-        let ramp = (0..len)
-            .map(|i| ((i % 33) as f32 - 16.0) / 3.0)
-            .collect();
-        vec![
-            ("base", base),
-            ("alternating", alternating),
-            ("ramp", ramp),
-        ]
+        let ramp = (0..len).map(|i| ((i % 33) as f32 - 16.0) / 3.0).collect();
+        vec![("base", base), ("alternating", alternating), ("ramp", ramp)]
     }
 
     fn block_float_positive_pattern_sets(len: usize) -> Vec<(&'static str, Vec<f32>)> {
@@ -4869,12 +5037,13 @@ stderr:
         let ramp = (0..len)
             .map(|i| 0.125f32 + ((i % 31) as f32 + 1.0) / 8.0)
             .collect();
-        let bounded = (0..len)
-            .map(|i| 0.2f32 + ((i % 9) as f32) * 0.35)
-            .collect();
-        vec![("positive_base", base), ("positive_ramp", ramp), ("positive_bounded", bounded)]
+        let bounded = (0..len).map(|i| 0.2f32 + ((i % 9) as f32) * 0.35).collect();
+        vec![
+            ("positive_base", base),
+            ("positive_ramp", ramp),
+            ("positive_bounded", bounded),
+        ]
     }
-
 
     fn repeated_wrapper_pattern(pattern: &[f32], len: usize) -> Vec<f32> {
         assert!(!pattern.is_empty(), "wrapper pattern must not be empty");
@@ -4973,8 +5142,9 @@ stderr:
         const BFP4_MANTISSA_BITS: i32 = 3;
         const MAX_ULP_DIFF: f32 = 2.0;
 
-        let expected_tilized = libtt_metal_cxx::tilize(bytemuck::cast_slice(expected), M, N, ELEM_SIZE)
-            .expect("bfp4 expected tilize");
+        let expected_tilized =
+            libtt_metal_cxx::tilize(bytemuck::cast_slice(expected), M, N, ELEM_SIZE)
+                .expect("bfp4 expected tilize");
         let output_tilized = libtt_metal_cxx::tilize(bytemuck::cast_slice(output), M, N, ELEM_SIZE)
             .expect("bfp4 output tilize");
         let expected_tilized: &[f32] = bytemuck::cast_slice(&expected_tilized);
@@ -5103,9 +5273,7 @@ stderr:
                 let rhs_base = (0..len)
                     .map(|i| [0.25f32, 0.5, 1.0, 2.0, 4.0, 0.75, 1.5, 3.0][i % 8])
                     .collect();
-                let lhs_ramp = (0..len)
-                    .map(|i| ((i % 27) as f32 - 13.0) / 5.0)
-                    .collect();
+                let lhs_ramp = (0..len).map(|i| ((i % 27) as f32 - 13.0) / 5.0).collect();
                 let rhs_ramp = (0..len)
                     .map(|i| 0.25f32 + ((i % 23) as f32 + 1.0) / 9.0)
                     .collect();
@@ -5116,17 +5284,25 @@ stderr:
                 let rhs_base = (0..len)
                     .map(|i| [0.5f32, -0.25, 1.5, -1.0, 0.75, -0.5, 2.0, -1.5][i % 8])
                     .collect();
-                let lhs_ramp = (0..len)
-                    .map(|i| ((i % 29) as f32 - 14.0) / 6.0)
-                    .collect();
-                let rhs_ramp = (0..len)
-                    .map(|i| ((i % 19) as f32 - 9.0) / 5.0)
-                    .collect();
+                let lhs_ramp = (0..len).map(|i| ((i % 29) as f32 - 14.0) / 6.0).collect();
+                let rhs_ramp = (0..len).map(|i| ((i % 19) as f32 - 9.0) / 5.0).collect();
                 let lhs_bounded = (0..len)
-                    .map(|i| if i % 2 == 0 { 0.125 * ((i % 11) as f32 + 1.0) } else { -0.125 * ((i % 11) as f32 + 1.0) })
+                    .map(|i| {
+                        if i % 2 == 0 {
+                            0.125 * ((i % 11) as f32 + 1.0)
+                        } else {
+                            -0.125 * ((i % 11) as f32 + 1.0)
+                        }
+                    })
                     .collect();
                 let rhs_bounded = (0..len)
-                    .map(|i| if i % 3 == 0 { 0.25 * ((i % 7) as f32 + 1.0) } else { -0.2 * ((i % 7) as f32 + 1.0) })
+                    .map(|i| {
+                        if i % 3 == 0 {
+                            0.25 * ((i % 7) as f32 + 1.0)
+                        } else {
+                            -0.2 * ((i % 7) as f32 + 1.0)
+                        }
+                    })
                     .collect();
                 vec![
                     ("base", lhs_base, rhs_base),
@@ -5158,7 +5334,6 @@ stderr:
         }
     }
 
-
     fn run_native_block_float_binary_wrapper_suite(
         label: &str,
         data_format_tt: u8,
@@ -5178,7 +5353,8 @@ stderr:
             &add_rhs,
         );
 
-        let sub_lhs = repeated_wrapper_pattern(&[2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0], LEN);
+        let sub_lhs =
+            repeated_wrapper_pattern(&[2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0], LEN);
         let sub_rhs = repeated_wrapper_pattern(&[0.5, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0], LEN);
         run_native_block_float_binary_case(
             &format!("{label}/sub"),
@@ -5259,11 +5435,16 @@ stderr:
             data_format_tt,
         )
         .expect("rhs tilize");
-        let lhs_buf = MeshBuffer::create_replicated(&mesh, buf_size, tile_size as u64, 0).expect("lhs buffer");
-        let rhs_buf = MeshBuffer::create_replicated(&mesh, buf_size, tile_size as u64, 0).expect("rhs buffer");
-        let out_buf = MeshBuffer::create_replicated(&mesh, buf_size, tile_size as u64, 0).expect("out buffer");
-        mesh.write_mesh_buffer(&lhs_buf, &lhs_packed).expect("lhs write");
-        mesh.write_mesh_buffer(&rhs_buf, &rhs_packed).expect("rhs write");
+        let lhs_buf = MeshBuffer::create_replicated(&mesh, buf_size, tile_size as u64, 0)
+            .expect("lhs buffer");
+        let rhs_buf = MeshBuffer::create_replicated(&mesh, buf_size, tile_size as u64, 0)
+            .expect("rhs buffer");
+        let out_buf = MeshBuffer::create_replicated(&mesh, buf_size, tile_size as u64, 0)
+            .expect("out buffer");
+        mesh.write_mesh_buffer(&lhs_buf, &lhs_packed)
+            .expect("lhs write");
+        mesh.write_mesh_buffer(&rhs_buf, &rhs_packed)
+            .expect("rhs write");
 
         let sources = TtKernelSources::binary_kernel_with_format(
             op,
@@ -5279,49 +5460,103 @@ stderr:
         let cb_size = cb_tiles * tile_size;
 
         let mut cb_lhs = CircularBufferConfig::new(cb_size);
-        cb_lhs.index(0).set_data_format(cb_format).set_page_size(tile_size);
-        program.create_circular_buffer(&core_range, &cb_lhs).expect("lhs CB");
+        cb_lhs
+            .index(0)
+            .set_data_format(cb_format)
+            .set_page_size(tile_size);
+        program
+            .create_circular_buffer(&core_range, &cb_lhs)
+            .expect("lhs CB");
 
         let mut cb_rhs = CircularBufferConfig::new(cb_size);
-        cb_rhs.index(1).set_data_format(cb_format).set_page_size(tile_size);
-        program.create_circular_buffer(&core_range, &cb_rhs).expect("rhs CB");
+        cb_rhs
+            .index(1)
+            .set_data_format(cb_format)
+            .set_page_size(tile_size);
+        program
+            .create_circular_buffer(&core_range, &cb_rhs)
+            .expect("rhs CB");
 
         let mut cb_out = CircularBufferConfig::new(cb_size);
-        cb_out.index(16).set_data_format(cb_format).set_page_size(tile_size);
-        program.create_circular_buffer(&core_range, &cb_out).expect("out CB");
+        cb_out
+            .index(16)
+            .set_data_format(cb_format)
+            .set_page_size(tile_size);
+        program
+            .create_circular_buffer(&core_range, &cb_out)
+            .expect("out CB");
 
         let mut reader_config = DataMovementKernelConfig::reader().expect("reader config");
-        reader_config.set_processor(DataMovementProcessor::Riscv1).set_opt_level(KernelBuildOptLevel::O3);
+        reader_config
+            .set_processor(DataMovementProcessor::Riscv1)
+            .set_opt_level(KernelBuildOptLevel::O3);
         reader_config.add_compile_arg(2);
         reader_config.add_compile_arg(tile_size);
         reader_config.add_compile_arg(2);
         reader_config.add_compile_arg(tile_size);
-        let reader_id = program.create_data_movement_kernel_from_string_with_config(&sources.reader_source, core, &reader_config).expect("reader");
+        let reader_id = program
+            .create_data_movement_kernel_from_string_with_config(
+                &sources.reader_source,
+                core,
+                &reader_config,
+            )
+            .expect("reader");
 
         let mut writer_config = DataMovementKernelConfig::writer().expect("writer config");
-        writer_config.set_processor(DataMovementProcessor::Riscv0).set_opt_level(KernelBuildOptLevel::O3);
+        writer_config
+            .set_processor(DataMovementProcessor::Riscv0)
+            .set_opt_level(KernelBuildOptLevel::O3);
         writer_config.add_compile_arg(2);
         writer_config.add_compile_arg(tile_size);
-        let writer_id = program.create_data_movement_kernel_from_string_with_config(&sources.writer_source, core, &writer_config).expect("writer");
+        let writer_id = program
+            .create_data_movement_kernel_from_string_with_config(
+                &sources.writer_source,
+                core,
+                &writer_config,
+            )
+            .expect("writer");
 
         let mut compute_config = ComputeKernelConfig::new();
-        compute_config.set_math_fidelity(MathFidelity::HiFi4).set_opt_level(KernelBuildOptLevel::O3);
+        compute_config
+            .set_math_fidelity(MathFidelity::HiFi4)
+            .set_opt_level(KernelBuildOptLevel::O3);
         if data_format_tt == 6 {
             compute_config.set_bfp8_pack_precise(true);
         }
-        let compute_id = program.create_compute_kernel_from_string_with_config(&sources.compute_source, core, &compute_config).expect("compute");
+        let compute_id = program
+            .create_compute_kernel_from_string_with_config(
+                &sources.compute_source,
+                core,
+                &compute_config,
+            )
+            .expect("compute");
 
-        program.set_runtime_args(reader_id, core, &[lhs_buf.address(), rhs_buf.address(), NUM_TILES]).expect("reader args");
-        program.set_runtime_args(writer_id, core, &[out_buf.address(), NUM_TILES]).expect("writer args");
-        program.set_runtime_args(compute_id, core, &[NUM_TILES]).expect("compute args");
+        program
+            .set_runtime_args(
+                reader_id,
+                core,
+                &[lhs_buf.address(), rhs_buf.address(), NUM_TILES],
+            )
+            .expect("reader args");
+        program
+            .set_runtime_args(writer_id, core, &[out_buf.address(), NUM_TILES])
+            .expect("writer args");
+        program
+            .set_runtime_args(compute_id, core, &[NUM_TILES])
+            .expect("compute args");
 
         let mut workload = MeshWorkload::new();
-        workload.add_program_to_full_mesh(&mesh, program).expect("workload");
+        workload
+            .add_program_to_full_mesh(&mesh, program)
+            .expect("workload");
         mesh.enqueue_workload(&mut workload, true).expect("enqueue");
 
         let mut output_packed = vec![0u8; buf_size as usize];
-        mesh.read_mesh_buffer(&out_buf, &mut output_packed).expect("output read");
-        let output_bytes = libtt_metal_cxx::untilize_with_data_format(&output_packed, M, N, data_format_tt).expect("output untilize");
+        mesh.read_mesh_buffer(&out_buf, &mut output_packed)
+            .expect("output read");
+        let output_bytes =
+            libtt_metal_cxx::untilize_with_data_format(&output_packed, M, N, data_format_tt)
+                .expect("output untilize");
         let output: &[f32] = bytemuck::cast_slice(&output_bytes);
         assert_block_float_semantic_match(
             &format!("{label} binary"),
@@ -5341,15 +5576,14 @@ stderr:
                 let mild = (0..len)
                     .map(|i| [-2.0f32, -1.0, -0.5, 0.0, 0.5, 1.0, 1.5, 2.0][i % 8])
                     .collect();
-                let bounded = (0..len)
-                    .map(|i| ((i % 17) as f32 - 8.0) / 4.0)
-                    .collect();
+                let bounded = (0..len).map(|i| ((i % 17) as f32 - 8.0) / 4.0).collect();
                 vec![("exp_mild", mild), ("exp_bounded", bounded)]
             }
-            TtUnaryComputeOp::Sin | TtUnaryComputeOp::Cos | TtUnaryComputeOp::Tan | TtUnaryComputeOp::Tanh => {
-                let bounded = (0..len)
-                    .map(|i| ((i % 15) as f32 - 7.0) / 8.0)
-                    .collect();
+            TtUnaryComputeOp::Sin
+            | TtUnaryComputeOp::Cos
+            | TtUnaryComputeOp::Tan
+            | TtUnaryComputeOp::Tanh => {
+                let bounded = (0..len).map(|i| ((i % 15) as f32 - 7.0) / 8.0).collect();
                 let gentle = (0..len)
                     .map(|i| [-1.0f32, -0.75, -0.5, -0.25, 0.0, 0.25, 0.5, 0.75][i % 8])
                     .collect();
@@ -5378,7 +5612,6 @@ stderr:
         }
     }
 
-
     fn run_native_block_float_unary_wrapper_suite(
         label: &str,
         data_format_tt: u8,
@@ -5386,7 +5619,8 @@ stderr:
         tile_size: u32,
     ) {
         const LEN: usize = (64 * 64) as usize;
-        let abs_input = repeated_wrapper_pattern(&[-1.0, 0.0, 2.0, -3.0, -4.5, 5.5, -6.5, 7.5], LEN);
+        let abs_input =
+            repeated_wrapper_pattern(&[-1.0, 0.0, 2.0, -3.0, -4.5, 5.5, -6.5, 7.5], LEN);
         run_native_block_float_unary_case(
             &format!("{label}/abs"),
             data_format_tt,
@@ -5396,7 +5630,8 @@ stderr:
             &abs_input,
         );
 
-        let sqrt_input = repeated_wrapper_pattern(&[0.0, 1.0, 4.0, 9.0, 16.0, 25.0, 36.0, 49.0], LEN);
+        let sqrt_input =
+            repeated_wrapper_pattern(&[0.0, 1.0, 4.0, 9.0, 16.0, 25.0, 36.0, 49.0], LEN);
         run_native_block_float_unary_case(
             &format!("{label}/sqrt"),
             data_format_tt,
@@ -5406,7 +5641,8 @@ stderr:
             &sqrt_input,
         );
 
-        let rsqrt_input = repeated_wrapper_pattern(&[1.0, 4.0, 16.0, 0.25, 9.0, 36.0, 49.0, 64.0], LEN);
+        let rsqrt_input =
+            repeated_wrapper_pattern(&[1.0, 4.0, 16.0, 0.25, 9.0, 36.0, 49.0, 64.0], LEN);
         run_native_block_float_unary_case(
             &format!("{label}/rsqrt"),
             data_format_tt,
@@ -5416,7 +5652,8 @@ stderr:
             &rsqrt_input,
         );
 
-        let trig_input = repeated_wrapper_pattern(&[0.0, 0.25, 0.5, 0.75, -0.25, -0.5, -0.75, 1.0], LEN);
+        let trig_input =
+            repeated_wrapper_pattern(&[0.0, 0.25, 0.5, 0.75, -0.25, -0.5, -0.75, 1.0], LEN);
         run_native_block_float_unary_case(
             &format!("{label}/sin"),
             data_format_tt,
@@ -5442,7 +5679,8 @@ stderr:
             &trig_input,
         );
 
-        let tanh_input = repeated_wrapper_pattern(&[0.0, 1.0, -1.0, 2.0, -2.0, 3.0, -0.5, 0.5], LEN);
+        let tanh_input =
+            repeated_wrapper_pattern(&[0.0, 1.0, -1.0, 2.0, -2.0, 3.0, -0.5, 0.5], LEN);
         run_native_block_float_unary_case(
             &format!("{label}/tanh"),
             data_format_tt,
@@ -5512,11 +5750,20 @@ stderr:
             data_format_tt,
         )
         .expect("input tilize");
-        let input_buf = MeshBuffer::create_replicated(&mesh, buf_size, tile_size as u64, 0).expect("input buffer");
-        let out_buf = MeshBuffer::create_replicated(&mesh, buf_size, tile_size as u64, 0).expect("out buffer");
-        mesh.write_mesh_buffer(&input_buf, &input_packed).expect("input write");
+        let input_buf = MeshBuffer::create_replicated(&mesh, buf_size, tile_size as u64, 0)
+            .expect("input buffer");
+        let out_buf = MeshBuffer::create_replicated(&mesh, buf_size, tile_size as u64, 0)
+            .expect("out buffer");
+        mesh.write_mesh_buffer(&input_buf, &input_packed)
+            .expect("input write");
 
-        let sources = TtKernelSources::unary_kernel_with_format(op, NUM_TILES, tile_size, data_format_tt, tile_size / (32 * 32));
+        let sources = TtKernelSources::unary_kernel_with_format(
+            op,
+            NUM_TILES,
+            tile_size,
+            data_format_tt,
+            tile_size / (32 * 32),
+        );
         let core = LogicalCore::new(0, 0);
         let core_range = CoreRangeSet::from_core(core);
         let mut program = Program::new();
@@ -5524,45 +5771,90 @@ stderr:
         let cb_size = cb_tiles * tile_size;
 
         let mut cb_in = CircularBufferConfig::new(cb_size);
-        cb_in.index(0).set_data_format(cb_format).set_page_size(tile_size);
-        program.create_circular_buffer(&core_range, &cb_in).expect("input CB");
+        cb_in
+            .index(0)
+            .set_data_format(cb_format)
+            .set_page_size(tile_size);
+        program
+            .create_circular_buffer(&core_range, &cb_in)
+            .expect("input CB");
 
         let mut cb_out = CircularBufferConfig::new(cb_size);
-        cb_out.index(16).set_data_format(cb_format).set_page_size(tile_size);
-        program.create_circular_buffer(&core_range, &cb_out).expect("output CB");
+        cb_out
+            .index(16)
+            .set_data_format(cb_format)
+            .set_page_size(tile_size);
+        program
+            .create_circular_buffer(&core_range, &cb_out)
+            .expect("output CB");
 
         let mut reader_config = DataMovementKernelConfig::reader().expect("reader config");
-        reader_config.set_processor(DataMovementProcessor::Riscv1).set_opt_level(KernelBuildOptLevel::O3);
+        reader_config
+            .set_processor(DataMovementProcessor::Riscv1)
+            .set_opt_level(KernelBuildOptLevel::O3);
         reader_config.add_compile_arg(2);
         reader_config.add_compile_arg(tile_size);
         reader_config.add_compile_arg(2);
         reader_config.add_compile_arg(tile_size);
-        let reader_id = program.create_data_movement_kernel_from_string_with_config(&sources.reader_source, core, &reader_config).expect("reader");
+        let reader_id = program
+            .create_data_movement_kernel_from_string_with_config(
+                &sources.reader_source,
+                core,
+                &reader_config,
+            )
+            .expect("reader");
 
         let mut writer_config = DataMovementKernelConfig::writer().expect("writer config");
-        writer_config.set_processor(DataMovementProcessor::Riscv0).set_opt_level(KernelBuildOptLevel::O3);
+        writer_config
+            .set_processor(DataMovementProcessor::Riscv0)
+            .set_opt_level(KernelBuildOptLevel::O3);
         writer_config.add_compile_arg(2);
         writer_config.add_compile_arg(tile_size);
-        let writer_id = program.create_data_movement_kernel_from_string_with_config(&sources.writer_source, core, &writer_config).expect("writer");
+        let writer_id = program
+            .create_data_movement_kernel_from_string_with_config(
+                &sources.writer_source,
+                core,
+                &writer_config,
+            )
+            .expect("writer");
 
         let mut compute_config = ComputeKernelConfig::new();
-        compute_config.set_math_fidelity(MathFidelity::HiFi4).set_opt_level(KernelBuildOptLevel::O3);
+        compute_config
+            .set_math_fidelity(MathFidelity::HiFi4)
+            .set_opt_level(KernelBuildOptLevel::O3);
         if data_format_tt == 6 {
             compute_config.set_bfp8_pack_precise(true);
         }
-        let compute_id = program.create_compute_kernel_from_string_with_config(&sources.compute_source, core, &compute_config).expect("compute");
+        let compute_id = program
+            .create_compute_kernel_from_string_with_config(
+                &sources.compute_source,
+                core,
+                &compute_config,
+            )
+            .expect("compute");
 
-        program.set_runtime_args(reader_id, core, &[input_buf.address(), NUM_TILES]).expect("reader args");
-        program.set_runtime_args(writer_id, core, &[out_buf.address(), NUM_TILES]).expect("writer args");
-        program.set_runtime_args(compute_id, core, &[NUM_TILES]).expect("compute args");
+        program
+            .set_runtime_args(reader_id, core, &[input_buf.address(), NUM_TILES])
+            .expect("reader args");
+        program
+            .set_runtime_args(writer_id, core, &[out_buf.address(), NUM_TILES])
+            .expect("writer args");
+        program
+            .set_runtime_args(compute_id, core, &[NUM_TILES])
+            .expect("compute args");
 
         let mut workload = MeshWorkload::new();
-        workload.add_program_to_full_mesh(&mesh, program).expect("workload");
+        workload
+            .add_program_to_full_mesh(&mesh, program)
+            .expect("workload");
         mesh.enqueue_workload(&mut workload, true).expect("enqueue");
 
         let mut output_packed = vec![0u8; buf_size as usize];
-        mesh.read_mesh_buffer(&out_buf, &mut output_packed).expect("output read");
-        let output_bytes = libtt_metal_cxx::untilize_with_data_format(&output_packed, M, N, data_format_tt).expect("output untilize");
+        mesh.read_mesh_buffer(&out_buf, &mut output_packed)
+            .expect("output read");
+        let output_bytes =
+            libtt_metal_cxx::untilize_with_data_format(&output_packed, M, N, data_format_tt)
+                .expect("output untilize");
         let output: &[f32] = bytemuck::cast_slice(&output_bytes);
         assert_block_float_semantic_match(
             &format!("{label} unary"),
@@ -5587,7 +5879,11 @@ stderr:
         const NUM_ELEMENTS: usize = (M * N) as usize;
         let buf_size = NUM_TILES as u64 * tile_size as u64;
 
-        assert_eq!(input.len(), NUM_ELEMENTS, "{label} logical element count mismatch");
+        assert_eq!(
+            input.len(),
+            NUM_ELEMENTS,
+            "{label} logical element count mismatch"
+        );
 
         let input_buf = MeshBuffer::create_replicated(&mesh, buf_size, tile_size as u64, 0)
             .expect("input buffer");
@@ -5601,15 +5897,15 @@ stderr:
             data_format_tt,
         )
         .expect("block-float tilize");
-        assert_eq!(input_packed.len(), buf_size as usize, "{label} packed size mismatch");
+        assert_eq!(
+            input_packed.len(),
+            buf_size as usize,
+            "{label} packed size mismatch"
+        );
 
-        let expected_bytes = libtt_metal_cxx::untilize_with_data_format(
-            &input_packed,
-            M,
-            N,
-            data_format_tt,
-        )
-        .expect("block-float untilize");
+        let expected_bytes =
+            libtt_metal_cxx::untilize_with_data_format(&input_packed, M, N, data_format_tt)
+                .expect("block-float untilize");
         let expected: &[f32] = bytemuck::cast_slice(&expected_bytes);
 
         mesh.write_mesh_buffer(&input_buf, &input_packed)
@@ -5707,13 +6003,9 @@ stderr:
         let mut output_packed = vec![0u8; buf_size as usize];
         mesh.read_mesh_buffer(&output_buf, &mut output_packed)
             .expect("output read");
-        let output_bytes = libtt_metal_cxx::untilize_with_data_format(
-            &output_packed,
-            M,
-            N,
-            data_format_tt,
-        )
-        .expect("output untilize");
+        let output_bytes =
+            libtt_metal_cxx::untilize_with_data_format(&output_packed, M, N, data_format_tt)
+                .expect("output untilize");
         let output: &[f32] = bytemuck::cast_slice(&output_bytes);
         let mismatches = expected
             .iter()
@@ -6114,7 +6406,6 @@ void kernel_main() {
                     mismatches, num_u16, all_bf80
                 );
             }
-    
         });
     }
 
@@ -6149,8 +6440,9 @@ void kernel_main() {
             }
 
             // Tilize before writing
-            let tilized = libtt_metal_cxx::tilize(bytemuck::cast_slice(&input_bf16), M, N, ELEM_SIZE)
-                .expect("tilize");
+            let tilized =
+                libtt_metal_cxx::tilize(bytemuck::cast_slice(&input_bf16), M, N, ELEM_SIZE)
+                    .expect("tilize");
             mesh.write_mesh_buffer(&input_buf, &tilized)
                 .expect("input write");
 
@@ -6257,7 +6549,6 @@ void kernel_main() {
                 "three-kernel tilized: {}/{} mismatches",
                 mismatches, NUM_ELEMENTS
             );
-    
         });
     }
 
@@ -6387,7 +6678,6 @@ void kernel_main() {
                 "IR pipeline copy: {}/{} mismatches",
                 mismatches, num_u16
             );
-    
         });
     }
 
@@ -6557,7 +6847,6 @@ void kernel_main() {
                 "IR pipeline add: {}/{} mismatches",
                 mismatches, num_u16
             );
-    
         });
     }
 
@@ -6567,8 +6856,13 @@ void kernel_main() {
             let lhs = tiled_bf16_pattern(&[0x3F80, 0x4000, 0x4040, 0x4080]);
             let rhs = tiled_bf16_pattern(&[0x3F00, 0x3F80, 0x4000, 0x4040]);
             let expected = tiled_bf16_pattern(&[0x3F00, 0x3F80, 0x3F80, 0x3F80]);
-            run_native_binary_ir_pipeline_test("sub", build_sub_kernel(), lhs.as_slice(), rhs.as_slice(), &expected);
-    
+            run_native_binary_ir_pipeline_test(
+                "sub",
+                build_sub_kernel(),
+                lhs.as_slice(),
+                rhs.as_slice(),
+                &expected,
+            );
         });
     }
 
@@ -6578,8 +6872,13 @@ void kernel_main() {
             let lhs = tiled_bf16_pattern(&[0x4000, 0x4040, 0x4080, 0x4100]);
             let rhs = tiled_bf16_pattern(&[0x3F00, 0x3F00, 0x3F80, 0x3F80]);
             let expected = tiled_bf16_pattern(&[0x3F80, 0x3FC0, 0x4080, 0x4100]);
-            run_native_binary_ir_pipeline_test("mul", build_mul_kernel(), lhs.as_slice(), rhs.as_slice(), &expected);
-    
+            run_native_binary_ir_pipeline_test(
+                "mul",
+                build_mul_kernel(),
+                lhs.as_slice(),
+                rhs.as_slice(),
+                &expected,
+            );
         });
     }
 
@@ -6588,8 +6887,12 @@ void kernel_main() {
         with_tt_hardware_test(|| {
             let input = tiled_bf16_pattern(&[0x3E80, 0x3F80, 0x4080, 0x4110]);
             let expected = tiled_bf16_pattern(&[0x3F00, 0x3F80, 0x4000, 0x4040]);
-            run_native_unary_ir_pipeline_test("sqrt", build_sqrt_kernel(), input.as_slice(), &expected);
-    
+            run_native_unary_ir_pipeline_test(
+                "sqrt",
+                build_sqrt_kernel(),
+                input.as_slice(),
+                &expected,
+            );
         });
     }
 
@@ -6598,9 +6901,7 @@ void kernel_main() {
         const TILE_SIZE: u32 = 32 * 32 * 2;
         const NUM_TILES: u32 = 2;
         let num_u16 = (NUM_TILES * TILE_SIZE / 2) as usize;
-        (0..num_u16)
-            .map(|i| pattern[i % pattern.len()])
-            .collect()
+        (0..num_u16).map(|i| pattern[i % pattern.len()]).collect()
     }
 
     fn run_native_binary_ir_pipeline_test(
@@ -6631,9 +6932,14 @@ void kernel_main() {
         mesh.write_mesh_buffer(&input_b, bytemuck::cast_slice(rhs))
             .expect("input B write");
 
-        let sources = cubecl_cpp::tt_metal::compile::compile_to_tt_sources(&kernel, NUM_TILES, TILE_SIZE)
-            .expect("compile_to_tt_sources");
-        assert!(sources.compute_source.contains(&format!("{op_label}_tiles")));
+        let sources =
+            cubecl_cpp::tt_metal::compile::compile_to_tt_sources(&kernel, NUM_TILES, TILE_SIZE)
+                .expect("compile_to_tt_sources");
+        assert!(
+            sources
+                .compute_source
+                .contains(&format!("{op_label}_tiles"))
+        );
 
         let core = LogicalCore::new(0, 0);
         let core_range = CoreRangeSet::from_core(core);
@@ -6738,7 +7044,8 @@ void kernel_main() {
             .filter(|(a, b)| a != b)
             .count();
         assert_eq!(
-            mismatches, 0,
+            mismatches,
+            0,
             "IR pipeline {op_label}: {}/{} mismatches
 first output: {:?}
 first expected: {:?}",
@@ -6761,7 +7068,11 @@ first expected: {:?}",
         const NUM_TILES: u32 = 2;
         const BUF_SIZE: u64 = NUM_TILES as u64 * TILE_SIZE as u64;
 
-        assert_eq!(input.len(), expected.len(), "input/expected length mismatch");
+        assert_eq!(
+            input.len(),
+            expected.len(),
+            "input/expected length mismatch"
+        );
 
         let input_buf = MeshBuffer::create_replicated(&mesh, BUF_SIZE, TILE_SIZE as u64, 0)
             .expect("input buffer");
@@ -6771,8 +7082,9 @@ first expected: {:?}",
         mesh.write_mesh_buffer(&input_buf, bytemuck::cast_slice(input))
             .expect("input write");
 
-        let sources = cubecl_cpp::tt_metal::compile::compile_to_tt_sources(&kernel, NUM_TILES, TILE_SIZE)
-            .expect("compile_to_tt_sources");
+        let sources =
+            cubecl_cpp::tt_metal::compile::compile_to_tt_sources(&kernel, NUM_TILES, TILE_SIZE)
+                .expect("compile_to_tt_sources");
         assert!(sources.compute_source.contains(&format!("{op_label}_tile")));
 
         let core = LogicalCore::new(0, 0);
@@ -6864,7 +7176,8 @@ first expected: {:?}",
             .filter(|(a, b)| a != b)
             .count();
         assert_eq!(
-            mismatches, 0,
+            mismatches,
+            0,
             "IR pipeline {op_label}: {}/{} mismatches
 first output: {:?}
 first expected: {:?}",
@@ -6936,12 +7249,21 @@ first expected: {:?}",
             make_test_resource(0x30, 16, 2048, vec![30, 31]),
         ];
 
-        let prepared = prepare_launch(&repr, sources, &resources, &Default::default(), CubeCount::Static(1, 1, 1))
-            .expect("launch should prepare");
+        let prepared = prepare_launch(
+            &repr,
+            sources,
+            &resources,
+            &Default::default(),
+            CubeCount::Static(1, 1, 1),
+        )
+        .expect("launch should prepare");
 
         assert_eq!(prepared.input_addrs, vec![0x10, 0x30]);
         assert_eq!(prepared.output_addrs, vec![0x20]);
-        assert_eq!(prepared.sources.reader_compile_args, vec![10, 4096, 30, 4096]);
+        assert_eq!(
+            prepared.sources.reader_compile_args,
+            vec![10, 4096, 30, 4096]
+        );
         assert_eq!(prepared.sources.writer_compile_args, vec![20, 4096]);
         assert_eq!(prepared.bindings[1].allocation_size_bytes, 2048);
     }
@@ -6965,8 +7287,14 @@ first expected: {:?}",
             make_test_resource(0x200, 24, 4096, vec![2, 4096]),
         ];
 
-        let prepared = prepare_launch(&repr, sources, &resources, &Default::default(), CubeCount::Static(1, 1, 1))
-            .expect("launch should prepare");
+        let prepared = prepare_launch(
+            &repr,
+            sources,
+            &resources,
+            &Default::default(),
+            CubeCount::Static(1, 1, 1),
+        )
+        .expect("launch should prepare");
 
         assert_eq!(prepared.sources.compute_runtime_args, vec![6, 6, 6, 6]);
         assert_eq!(prepared.bindings[0].logical_size_bytes, 24);
@@ -7051,7 +7379,6 @@ first expected: {:?}",
                 cubecl_core::server::LaunchError::CompilationError(_)
                     | cubecl_core::server::LaunchError::Unknown { .. }
             ));
-    
         });
     }
 
@@ -7075,7 +7402,6 @@ first expected: {:?}",
 
             cubecl_std::tests::trigonometry::test_to_degrees::<TestRuntime>(client.clone());
             cubecl_std::tests::trigonometry::test_to_radians::<TestRuntime>(client);
-    
         });
     }
 
@@ -7096,7 +7422,6 @@ first expected: {:?}",
             let bytes = client.read_one_unchecked(output);
             let actual = f32::from_bytes(&bytes);
             assert_eq!(actual, &[20.0, 50.0]);
-    
         });
     }
 
@@ -7117,7 +7442,6 @@ first expected: {:?}",
             let bytes = client.read_one_unchecked(output);
             let actual = f32::from_bytes(&bytes);
             assert_eq!(actual, &[15.0, 30.0]);
-    
         });
     }
 
@@ -7138,7 +7462,6 @@ first expected: {:?}",
             let bytes = client.read_one_unchecked(output);
             let actual = f32::from_bytes(&bytes);
             assert_eq!(actual, &[30.0, 900.0, 465.0]);
-    
         });
     }
 
@@ -7210,8 +7533,16 @@ first expected: {:?}",
         assert_eq!(sources.num_inputs, 0);
         assert_eq!(sources.num_outputs, 1);
         assert_eq!(sources.tile_size_bytes, 2048);
-        assert!(sources.writer_source.contains("for (uint32_t l_mut_0 = uint32_t(0);"));
-        assert!(sources.writer_source.contains("if (unit_idx >= num_units) break;"));
+        assert!(
+            sources
+                .writer_source
+                .contains("for (uint32_t l_mut_0 = uint32_t(0);")
+        );
+        assert!(
+            sources
+                .writer_source
+                .contains("if (unit_idx >= num_units) break;")
+        );
     }
 
     #[test]
@@ -7223,7 +7554,11 @@ first expected: {:?}",
         assert_eq!(sources.num_inputs, 0);
         assert_eq!(sources.num_outputs, 1);
         assert_eq!(sources.tile_size_bytes, 2048);
-        assert!(sources.writer_source.contains("uint32_t unit_idx = tile_idx * tile_units + i;"));
+        assert!(
+            sources
+                .writer_source
+                .contains("uint32_t unit_idx = tile_idx * tile_units + i;")
+        );
     }
 
     fn build_empty_kernel(
@@ -7459,6 +7794,7 @@ first expected: {:?}",
     ) -> crate::compute::storage::gpu::TtResource {
         crate::compute::storage::gpu::TtResource {
             storage_id: StorageId::new(),
+            owner_stream: cubecl_common::stream_id::StreamId { value: 0 },
             address,
             size: logical_size,
             allocation_size,
@@ -7705,8 +8041,10 @@ first expected: {:?}",
         );
         cubecl_cpp::register_supported_types(&mut device_props);
         register_wmma_features(Vec::new(), &mut device_props);
-        device_props.register_type_usage(OpaqueType::Barrier(BarrierLevel::Unit), TypeUsage::Buffer);
-        device_props.register_type_usage(OpaqueType::Barrier(BarrierLevel::Cube), TypeUsage::Buffer);
+        device_props
+            .register_type_usage(OpaqueType::Barrier(BarrierLevel::Unit), TypeUsage::Buffer);
+        device_props
+            .register_type_usage(OpaqueType::Barrier(BarrierLevel::Cube), TypeUsage::Buffer);
         device_props.features.memory_reinterpret = true;
         device_props.features.alignment = true;
 

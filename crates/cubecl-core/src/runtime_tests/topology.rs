@@ -105,7 +105,6 @@ fn run_topology_axis_components_case<R: Runtime>(
     assert_eq!(actual_unit, &expect_unit);
 }
 
-
 fn run_topology_axis_components_2d_case<R: Runtime>(
     client: ComputeClient<R>,
     addr_type: AddressType,
@@ -262,7 +261,6 @@ pub fn test_kernel_topology_axis_components_2d_single_cube_tail<R: Runtime>(
 ) {
     run_topology_axis_components_2d_case(client, addr_type, (12, 3, 1), 12 * 3 - 5);
 }
-
 
 pub fn test_kernel_topology_cube_components_3d<R: Runtime>(
     client: ComputeClient<R>,

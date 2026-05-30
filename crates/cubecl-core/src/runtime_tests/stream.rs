@@ -19,6 +19,10 @@ pub fn test_stream_small<R: Runtime>(client: ComputeClient<R>) {
     test_stream_chained::<R, f32>(client, 32, 1, 32);
 }
 
+pub fn test_stream_medium<R: Runtime>(client: ComputeClient<R>) {
+    test_stream_chained::<R, f32>(client, 256, 12, 256);
+}
+
 pub fn test_stream_chained<R: Runtime, F: Float + CubeElement>(
     client: ComputeClient<R>,
     len: usize,
@@ -27,7 +31,11 @@ pub fn test_stream_chained<R: Runtime, F: Float + CubeElement>(
 ) {
     assert!(len > 0);
     assert!(num_loop > 0);
-    assert_eq!(len % 32, 0, "len must be divisible by 32 for the TT wrapper");
+    assert_eq!(
+        len % 32,
+        0,
+        "len must be divisible by 32 for the TT wrapper"
+    );
 
     let client_1 = unsafe {
         let mut c = client.clone();
@@ -48,7 +56,8 @@ pub fn test_stream_chained<R: Runtime, F: Float + CubeElement>(
     let mut expected_first = 0.0f32;
 
     for _ in 0..rounds {
-        let output_ = client_1.empty(len * core::mem::size_of::<F>());
+        let zero_output = vec![F::new(0.0); len];
+        let output_ = client_1.create_from_slice(F::as_bytes(&zero_output));
         unsafe {
             big_task::launch::<F, R>(
                 &client_1,
@@ -62,9 +71,7 @@ pub fn test_stream_chained<R: Runtime, F: Float + CubeElement>(
         input = output_.clone();
         output = Some(output_);
 
-        let total: f32 = (0..num_loop)
-            .map(|i| state[i % state.len()] as f32)
-            .sum();
+        let total: f32 = (0..num_loop).map(|i| state[i % state.len()] as f32).sum();
         expected_first = total / num_loop as f32;
         state = vec![expected_first.to_bits(); len];
     }
@@ -92,7 +99,8 @@ pub fn test_stream<R: Runtime, F: Float + CubeElement>(client: ComputeClient<R>)
     let mut output = None;
 
     for _ in 0..300 {
-        let output_ = client_1.empty(len * core::mem::size_of::<F>());
+        let zero_output = vec![F::new(0.0); len];
+        let output_ = client_1.create_from_slice(F::as_bytes(&zero_output));
         unsafe {
             big_task::launch::<F, R>(
                 &client_1,

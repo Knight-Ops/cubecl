@@ -122,7 +122,6 @@ pub fn generate_reader_source(num_inputs: u32) -> String {
     src
 }
 
-
 /// Generate the C++ source for a TT-Metal reader (dataflow) kernel that preserves
 /// the raw linear page layout used by CubeCL host buffers.
 ///

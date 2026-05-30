@@ -9,8 +9,9 @@ use cubecl_core::{
     MemoryConfiguration, Runtime,
     device::{DeviceId, ServerUtilitiesHandle},
     ir::{
-        BarrierLevel, DeviceProperties, ElemType, FloatKind, HardwareProperties, IntKind, MatrixLayout, MemoryDeviceProperties, MmaProperties,
-        OpaqueType, StorageType, TargetProperties, Type, UIntKind, VectorSize,
+        BarrierLevel, DeviceProperties, ElemType, FloatKind, HardwareProperties, IntKind,
+        MatrixLayout, MemoryDeviceProperties, MmaProperties, OpaqueType, StorageType,
+        TargetProperties, Type, UIntKind, VectorSize,
         features::{AtomicUsage, Plane, TypeUsage},
     },
     server::ServerUtilities,
@@ -158,8 +159,10 @@ impl DeviceService for TtServer {
                 AtomicUsage::Add | AtomicUsage::MinMax,
             );
         }
-        device_props.register_type_usage(OpaqueType::Barrier(BarrierLevel::Unit), TypeUsage::Buffer);
-        device_props.register_type_usage(OpaqueType::Barrier(BarrierLevel::Cube), TypeUsage::Buffer);
+        device_props
+            .register_type_usage(OpaqueType::Barrier(BarrierLevel::Unit), TypeUsage::Buffer);
+        device_props
+            .register_type_usage(OpaqueType::Barrier(BarrierLevel::Cube), TypeUsage::Buffer);
         device_props.features.memory_reinterpret = true;
         device_props.features.alignment = true;
         device_props.features.plane.insert(Plane::Ops);

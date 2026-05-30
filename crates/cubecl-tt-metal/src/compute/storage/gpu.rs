@@ -1,4 +1,4 @@
-use cubecl_common::backtrace::BackTrace;
+use cubecl_common::{backtrace::BackTrace, stream_id::StreamId};
 use cubecl_runtime::server::IoError;
 use cubecl_runtime::storage::{ComputeStorage, StorageHandle, StorageId, StorageUtilization};
 use std::collections::HashMap;
@@ -24,6 +24,7 @@ use crate::runtime::{TT_DEFAULT_BUFFER_PAGE_SIZE_BYTES, TT_MEMORY_ALIGNMENT};
 #[derive(Debug, Clone)]
 pub struct TtResource {
     pub storage_id: StorageId,
+    pub owner_stream: StreamId,
     pub address: u32,
     pub size: u64,
     pub allocation_size: u64,
@@ -68,8 +69,11 @@ impl TtStorage {
     }
 
     pub fn get_mesh_buffer(&self, id: StorageId) -> &MeshBuffer {
-        println!("[get_mesh_buffer] id={id:?}");
-        &self.buffers.get(&id).expect("MeshBuffer not found").mesh_buffer
+        &self
+            .buffers
+            .get(&id)
+            .expect("MeshBuffer not found")
+            .mesh_buffer
     }
 
     pub fn get_layout(&self, id: StorageId) -> TtBufferLayout {
@@ -97,6 +101,7 @@ impl ComputeStorage for TtStorage {
             .expect("TT resource address should stay within 32-bit DRAM address space");
         TtResource {
             storage_id: id,
+            owner_stream: StreamId { value: 0 },
             address,
             size: handle.size(),
             allocation_size: buffer.mesh_buffer.size(),
@@ -111,7 +116,6 @@ impl ComputeStorage for TtStorage {
         let aligned_size = size.div_ceil(self.page_size) * self.page_size;
         let page_size = self.page_size;
 
-        println!("[TtStorage::alloc] aligned_size={aligned_size}");
         let buffer =
             MeshBuffer::create_replicated(mesh, aligned_size, page_size, 0).map_err(|e| {
                 IoError::Unknown {
@@ -122,7 +126,6 @@ impl ComputeStorage for TtStorage {
 
         let id = self.next_id;
         self.next_id = StorageId::new();
-        println!("[TtStorage::alloc] id={id:?} addr={:#x}", buffer.address());
         self.buffers.insert(
             id,
             TtBufferAllocation {
