@@ -28,3 +28,4 @@ Cargo.lock
 # Nix artifacts
 .envrc
 .direnv
+crates/cubecl-tt-metal/generated/

@@ -113,10 +113,6 @@ impl TtContext {
         output_addrs: &[u32],
         _logger: Arc<ServerLogger>,
     ) -> Result<TtCompiledKernel, LaunchError> {
-        let _ = println!(
-            "[compile_kernel] enter
-"
-        );
         let core = LogicalCore::new(0, 0);
         let core_range = CoreRangeSet::from_core(core);
 
@@ -131,10 +127,6 @@ impl TtContext {
             ));
         }
 
-        let _ = println!(
-            "[compile_kernel] Program::new
-"
-        );
         let mut program = Program::new();
 
         let cb_tiles = 2u32;
@@ -143,10 +135,6 @@ impl TtContext {
 
         let mut cb_in_ids = Vec::new();
         for i in 0..sources.num_inputs {
-            let _ = println!(
-                "[compile_kernel] create_circular_buffer in
-"
-            );
             let mut cb_config = CircularBufferConfig::new(cb_size);
             cb_config
                 .index(i as u8)
@@ -160,10 +148,6 @@ impl TtContext {
 
         let mut cb_out_ids = Vec::new();
         for i in 0..sources.num_outputs {
-            let _ = println!(
-                "[compile_kernel] create_circular_buffer out
-"
-            );
             let mut cb_config = CircularBufferConfig::new(cb_size);
             cb_config
                 .index(16u8 + i as u8)
@@ -175,10 +159,6 @@ impl TtContext {
             cb_out_ids.push(id);
         }
 
-        let _ = println!(
-            "[compile_kernel] create_data_movement reader
-"
-        );
         let mut reader_config =
             DataMovementKernelConfig::reader().map_err(map_launch_err("reader config"))?;
         reader_config
@@ -195,10 +175,6 @@ impl TtContext {
             )
             .map_err(map_kernel_build_err("reader kernel"))?;
 
-        let _ = println!(
-            "[compile_kernel] create_data_movement writer
-"
-        );
         let mut writer_config =
             DataMovementKernelConfig::writer().map_err(map_launch_err("writer config"))?;
         writer_config
@@ -215,10 +191,6 @@ impl TtContext {
             )
             .map_err(map_kernel_build_err("writer kernel"))?;
 
-        let _ = println!(
-            "[compile_kernel] create_compute_kernel
-"
-        );
         let mut compute_config = ComputeKernelConfig::new();
         compute_config
             .set_math_fidelity(MathFidelity::HiFi4)
@@ -236,10 +208,6 @@ impl TtContext {
             )
             .map_err(map_kernel_build_err("compute kernel"))?;
 
-        let _ = println!(
-            "[compile_kernel] set_runtime_args
-"
-        );
         let mut reader_args: Vec<u32> = input_addrs.to_vec();
         reader_args.push(sources.num_tiles);
         program
@@ -251,7 +219,6 @@ impl TtContext {
         writer_args.extend(output_addrs.iter().copied());
         writer_args.push(sources.num_tiles);
         writer_args.extend(sources.writer_runtime_args.iter().copied());
-        println!("[compile_kernel] writer_args={:?}", writer_args);
         program
             .set_runtime_args(writer_id, core, &writer_args)
             .map_err(map_launch_err("writer runtime args"))?;
@@ -282,15 +249,7 @@ impl TtContext {
         resources: &[TtResource],
         info: &cubecl_runtime::server::MetadataBindingInfo,
     ) -> Result<PreparedLaunch, LaunchError> {
-        let _ = println!(
-            "[compile_cube_task] enter
-"
-        );
         let mut compiler: TtCompiler = Default::default();
-        let _ = println!(
-            "[compile_cube_task] calling cube_kernel.compile()
-"
-        );
         let compiled = cube_kernel
             .compile(
                 &mut compiler,
@@ -299,10 +258,6 @@ impl TtContext {
                 cube_kernel.address_type(),
             )
             .map_err(LaunchError::CompilationError)?;
-        let _ = println!(
-            "[compile_cube_task] ir compiled
-"
-        );
 
         let repr = compiled.repr.as_ref().ok_or_else(|| {
             LaunchError::CompilationError(cubecl_runtime::compiler::CompilationError::Generic {
@@ -344,19 +299,11 @@ impl TtContext {
             info,
         )?;
 
-        let _ = println!(
-            "[compile_cube_task] calling compile_kernel
-"
-        );
         let result = self.compile_kernel(
             &prepared.sources,
             &prepared.input_addrs,
             &prepared.output_addrs,
             logger,
-        );
-        let _ = println!(
-            "[compile_cube_task] compile_kernel done
-"
         );
         result
     }

@@ -100,6 +100,26 @@ impl<'a> Command<'a> {
         Ok(resource)
     }
 
+    fn flush_pending_stream(&mut self, stream_id: &cubecl_common::stream_id::StreamId) -> Result<(), IoError> {
+        self.streams
+            .get(stream_id)
+            .flush_pending_workload()
+            .map_err(|err| IoError::Unknown {
+                backtrace: BackTrace::capture(),
+                description: format!("failed to flush pending TT workload on stream {stream_id}: {err:?}"),
+            })
+    }
+
+    fn flush_current_pending_workload(&mut self) -> Result<(), LaunchError> {
+        self.streams
+            .current()
+            .flush_pending_workload()
+            .map_err(|err| LaunchError::Unknown {
+                reason: format!("failed to flush pending TT workload: {err:?}"),
+                backtrace: BackTrace::capture(),
+            })
+    }
+
     pub(crate) fn read_resource_bytes(
         &mut self,
         resource: &TtResource,
@@ -121,6 +141,8 @@ impl<'a> Command<'a> {
             });
         }
 
+        self.flush_pending_stream(&resource.owner_stream)?;
+
         let stream = self.streams.get(&resource.owner_stream);
         let storage = &mut stream.memory_management_gpu;
         let mesh_buffer = storage.storage().get_mesh_buffer(resource.storage_id);
@@ -130,6 +152,7 @@ impl<'a> Command<'a> {
             mesh_buffer,
             &mut staged,
             "read_mesh_buffer failed",
+            true,
         )?;
 
         let start = resource.allocation_offset as usize;
@@ -160,6 +183,10 @@ impl<'a> Command<'a> {
             });
         }
 
+        if resource.allocation_offset != 0 || bytes.len() as u64 != resource.allocation_size {
+            self.flush_pending_stream(&resource.owner_stream)?;
+        }
+
         let stream = self.streams.get(&resource.owner_stream);
         let storage = &mut stream.memory_management_gpu;
         let mesh_buffer = storage.storage().get_mesh_buffer(resource.storage_id);
@@ -174,11 +201,15 @@ impl<'a> Command<'a> {
                 mesh_buffer,
                 &mut staged,
                 "read_mesh_buffer before partial write failed",
+                true,
             )?;
         }
 
         staged[start..end].copy_from_slice(bytes);
-        mesh_write_buffer(self.mesh, mesh_buffer, &staged, "write_mesh_buffer failed")
+        self.streams
+            .get(&resource.owner_stream)
+            .enqueue_replicated_write(resource.storage_id, staged);
+        Ok(())
     }
 
     fn create_temp_tiled_buffer(
@@ -205,7 +236,7 @@ impl<'a> Command<'a> {
         })?;
         if !staged.is_empty() {
             let write_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                self.mesh.write_mesh_buffer(&mesh_buffer, staged)
+                self.mesh.write_mesh_buffer_with_mode(&mesh_buffer, staged, false)
             }));
             match write_result {
                 Ok(Ok(())) => {}
@@ -349,7 +380,7 @@ impl<'a> Command<'a> {
             let mut staged = vec![0u8; output.temp.mesh_buffer.size() as usize];
             let read_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 self.mesh
-                    .read_mesh_buffer(&output.temp.mesh_buffer, &mut staged)
+                    .read_mesh_buffer_with_mode(&output.temp.mesh_buffer, &mut staged, true)
             }));
             match read_result {
                 Ok(Ok(())) => {}
@@ -500,7 +531,7 @@ impl<'a> Command<'a> {
         self.add_program_to_workload(&mut workload, compiled.program, target)?;
 
         catch_launch_panic("enqueue_workload failed", || {
-            self.mesh.enqueue_workload(&mut workload, true)
+            self.mesh.enqueue_workload(&mut workload, false)
         })?;
 
         Ok(())
@@ -528,13 +559,25 @@ impl<'a> Command<'a> {
         )?;
         let target = self.launch_target_for_resources(resources)?;
 
-        let mut workload = libtt_metal_cxx::MeshWorkload::new();
-        self.add_program_to_workload(&mut workload, compiled.program, target)?;
-        catch_launch_panic("enqueue_workload failed", || {
-            self.mesh.enqueue_workload(&mut workload, true)
-        })?;
         if let Some(bridge) = bridge {
+            self.flush_current_pending_workload()?;
+            let mut workload = libtt_metal_cxx::MeshWorkload::new();
+            self.add_program_to_workload(&mut workload, compiled.program, target)?;
+            catch_launch_panic("enqueue_workload failed", || {
+                self.mesh.enqueue_workload(&mut workload, false)
+            })?;
             self.finish_tiled_launch_bridge(bridge)?;
+        } else {
+            match target {
+                TtLaunchTarget::FullMesh => self
+                    .streams
+                    .current()
+                    .enqueue_full_mesh_program(compiled.program)
+                    .map_err(|err| LaunchError::Unknown {
+                        reason: format!("failed to queue TT workload program: {err:?}"),
+                        backtrace: BackTrace::capture(),
+                    })?,
+            }
         }
         Ok(())
     }
@@ -545,9 +588,10 @@ fn mesh_write_buffer(
     mesh_buffer: &libtt_metal_cxx::MeshBuffer,
     staged: &[u8],
     context: &'static str,
+    blocking: bool,
 ) -> Result<(), IoError> {
     let write_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        mesh.write_mesh_buffer(mesh_buffer, staged)
+        mesh.write_mesh_buffer_with_mode(mesh_buffer, staged, blocking)
     }));
     match write_result {
         Ok(Ok(())) => Ok(()),
@@ -567,9 +611,10 @@ fn mesh_read_buffer(
     mesh_buffer: &libtt_metal_cxx::MeshBuffer,
     staged: &mut [u8],
     context: &'static str,
+    blocking: bool,
 ) -> Result<(), IoError> {
     let read_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        mesh.read_mesh_buffer(mesh_buffer, staged)
+        mesh.read_mesh_buffer_with_mode(mesh_buffer, staged, blocking)
     }));
     match read_result {
         Ok(Ok(())) => Ok(()),

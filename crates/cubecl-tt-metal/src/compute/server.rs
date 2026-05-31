@@ -534,6 +534,7 @@ impl TtServer {
         mode: StreamErrorMode,
     ) -> Result<(), ServerError> {
         let mut streams = self.streams.resolve(stream_id, [].into_iter(), false)?;
+        streams.current().flush_pending_workload()?;
         streams.current().flush_errors(mode)
     }
 

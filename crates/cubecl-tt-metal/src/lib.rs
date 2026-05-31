@@ -1213,6 +1213,7 @@ stderr:
                     cubecl_core::runtime_tests::stream::test_stream_medium::<TestRuntime>(client);
                 });
             }
+
         }
 
         mod synchronization {

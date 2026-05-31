@@ -190,6 +190,130 @@ The correct state today is:
 - keep backend-only stream recovery tests green
 - do not claim broad upstream stream parity until larger stream workloads are validated
 
+## Concrete Backtrace Findings
+
+## Throughput Experiments After The Backtrace
+
+Two targeted experiments were run after the debugger pass to verify that the blocker is about submission/completion throughput rather than a broken dependency graph.
+
+### 1. Non-blocking TT workload submission
+
+A targeted backend change was made in [command.rs](./src/compute/command.rs):
+- `mesh.enqueue_workload(&mut workload, true)` -> `mesh.enqueue_workload(&mut workload, false)`
+
+At the same time, the remaining hot-path debug printing was removed from:
+- [src/compute/context.rs](./src/compute/context.rs)
+- [src/compute/server.rs](./src/compute/server.rs)
+- [src/compute/command.rs](./src/compute/command.rs)
+- [src/compute/storage/gpu.rs](./src/compute/storage/gpu.rs)
+
+Outcome:
+- the normal TT hardware lane stayed green
+- the broad upstream-sized stream workload still did not finish within the validation window
+- this means per-launch blocking `enqueue_workload(true)` was part of the cost, but removing it was not sufficient by itself to promote full stream parity
+
+### 2. Host queue-depth diagnostic
+
+A temporary diagnostic changed `CHANNEL_MAX_TASK` in [channel.rs](../cubecl-common/src/device/handle/channel.rs):
+- `32` -> `1024`
+
+Outcome:
+- the broad workload still did not complete within the validation window
+- however, the observable process shape changed: the newest producer test thread no longer showed the earlier CPU-burning backoff behavior, which means the larger queue reduced producer-side back-pressure pressure
+- because the workload still did not finish, queue depth is not the only remaining bottleneck
+
+Interpretation:
+- host queue saturation is real, but it is not sufficient to explain the whole blocker
+- the remaining cost still sits in TT-side write / submission / completion behavior on the generic path
+
+### 3. In-order queued-op batching on the TT stream backend
+
+A deeper batching pass was implemented directly in the TT stream backend:
+- TT workload submission stays non-blocking
+- replicated logical writes are queued on the logical stream instead of being submitted immediately
+- CubeTask launches are also queued on the logical stream
+- flush points drain queued writes and queued one-program mesh workloads in original stream order
+- the low-level direct-source launch path was intentionally left immediate, because direct TT characterization tests read device buffers straight from `server.mesh()` and need immediate visibility
+
+Relevant code paths:
+- [src/compute/stream.rs](./src/compute/stream.rs)
+- [src/compute/command.rs](./src/compute/command.rs)
+- [../../libtt-metal-cxx/src/distributed.rs](../../libtt-metal-cxx/src/distributed.rs)
+- [../../libtt-metal-cxx/src/tt_metal_cxx/distributed.cc](../../libtt-metal-cxx/src/tt_metal_cxx/distributed.cc)
+
+Why this mattered:
+- the first launch-only batching attempt was incorrect because writes were still being submitted immediately, which destroyed the intended `write -> launch -> write -> launch` ordering of the broad stream workload
+- the second pass fixed that by batching writes and CubeTask launches together in order
+- a temporary over-broad version also batched the direct-source `kernel()` path and regressed `cubetask_compile_pipeline`; that was corrected by narrowing batching back to `kernel_cube()` only
+
+Broad-workload result after the ordered batching pass:
+- the full upstream-sized stream wrapper now runs in a much more truthful state than before
+- the worker thread stays CPU-hot on real TT hardware instead of immediately parking in the old producer-side enqueue bottleneck
+- however, even after the batching split was corrected, the workload still does not complete within a reasonable validation window, so broad stream parity still cannot be promoted into the live TT suite
+
+What this tells us:
+- the backend is no longer blocked on the original cross-stream correctness bug
+- it is also no longer blocked on the naive per-launch submission path alone
+- the remaining problem is honest throughput of the broad stress shape under TT host submission and execution costs
+
+### Practical takeaway
+
+The best current interpretation is:
+- reduced and medium stream parity are functionally correct
+- ordered TT-side batching improves the stream implementation materially, but the broad workload is still throughput-limited
+- the remaining cost is now a combination of TT host submission, TT host buffer writes, and TT command-queue completion latency under the upstream-sized stress shape
+- simple queue-size tuning, a single `blocking=false` switch, or launch-only batching are not enough on their own
+
+That leaves the next meaningful optimization work as:
+- coalescing multiple launches into fewer TT workload submissions where ordering allows
+- reducing TT host write frequency for patterns like repeated zero-initialized output staging
+- or adding a more explicit pending-work submission/drain model in the TT server instead of treating each launch as a standalone host round trip
+
+
+A debugger pass on the live broad workload produced the most important missing evidence.
+
+Broad workload used for the capture:
+- `TT_METAL_RUN_HARDWARE_TESTS=1 LD_LIBRARY_PATH=/usr/local/lib cargo test -p cubecl-tt-metal tests::cubecl_core_wrappers::stream::test_stream -- --exact --nocapture --test-threads=1`
+
+What the waiting side is doing:
+- The parent cargo process is just in `waitpid`, waiting on the test subprocess.
+- Inside the active hardware-test subprocess, the test harness main thread is parked waiting for `CompletedTest` results from the Rust test runner.
+- The interesting blocked producer thread is the test thread named `tests::cubecl_c...`; it is not waiting on a TT event or on `read_async`. It is blocked in `cubecl_common::device::handle::channel::custom_channel::DeviceClient::enqueue` at [channel.rs](../cubecl-common/src/device/handle/channel.rs), inside the launch submission path:
+  - `ComputeClient::launch_inner` in [client.rs](../cubecl-runtime/src/client.rs)
+  - `DeviceHandle::submit`
+  - `ChannelDeviceHandle::submit_inner`
+  - `DeviceClient::enqueue`
+  - then `std::thread::sleep` from the channel backoff loop
+
+What the TT server side is doing:
+- The active `DSD-0-0` server worker thread is blocked in TT-Metal's blocking enqueue path, not in CubeCL `MultiStream` logic:
+  - `cubecl_tt_metal::compute::command::Command::kernel_cube`
+  - `libtt_metal_cxx::distributed::MeshDevice::enqueue_workload(..., blocking=true)`
+  - `tt::tt_metal::distributed::FDMeshCommandQueue::enqueue_mesh_workload`
+  - `tt::tt_metal::distributed::FDMeshCommandQueue::finish_nolock`
+  - waiting on a pthread condition variable inside `libtt_metal.so`
+- A separate TT completion-queue thread (`DSD-0-0`) is CPU-hot in:
+  - `tt::tt_metal::distributed::FDMeshCommandQueue::read_completion_queue`
+  - `tt::tt_metal::SystemMemoryManager::completion_queue_wait_front`
+  - `tt::umd::LocalChip::read_from_sysmem`
+
+This combination matters:
+- the producer thread is stalled by host-side back-pressure in the custom channel
+- the server thread is stalled inside blocking TT workload submission/completion waiting
+- the TT completion thread is actively polling completions
+
+That is not the shape of a logical `MultiStream` dependency cycle. It is the shape of a bounded queue feeding a very expensive blocking server operation.
+
+What this says about queue growth:
+- The custom device channel in [channel.rs](../cubecl-common/src/device/handle/channel.rs) is bounded at `CHANNEL_MAX_TASK = 32`.
+- `DeviceClient::enqueue` blocks once `available_index >= CHANNEL_MAX_TASK`.
+- So the queue is not growing unbounded; it is saturating at a small fixed capacity and applying back-pressure to the producer.
+
+Practical interpretation:
+- The broad stream workload is currently bottlenecked by throughput / blocking submission semantics on the TT generic path.
+- The evidence does not point to a remaining cross-stream ownership bug.
+- The evidence also does not point to an obvious `MultiStream::apply_analysis` cycle in this run, because the producer is blocked before the test even reaches the final consumer-side read.
+
 ## Recommended Next Debugging Steps
 
 1. Instrument the submission/flush path around producer and consumer streams.
