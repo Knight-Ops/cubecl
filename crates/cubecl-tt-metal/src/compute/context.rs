@@ -390,8 +390,6 @@ impl TtContext {
         resources: &[TtResource],
         info: &cubecl_runtime::server::MetadataBindingInfo,
     ) -> Result<PreparedLaunch, LaunchError> {
-        const MAX_GENERIC_FULL_INPUT_STAGING_TILES: u32 = 16;
-
         let kernel_id = cube_kernel.id();
         let cached = match self.compiled_sources.entry(kernel_id) {
             Entry::Occupied(entry) => entry.into_mut(),

@@ -1248,6 +1248,16 @@ stderr:
                     cubecl_core::runtime_tests::stream::test_stream_medium::<TestRuntime>(client);
                 });
             }
+
+            #[test]
+            #[ignore = "Manual throughput characterization for the broad TT stream shape"]
+            fn test_stream_broad_single_round_manual() {
+                with_tt_hardware_test_client(|client| {
+                    cubecl_core::runtime_tests::stream::test_stream_chained::<TestRuntime, f32>(
+                        client, 4096, 1, 4096,
+                    );
+                });
+            }
         }
 
         mod synchronization {
@@ -7464,7 +7474,7 @@ first expected: {:?}",
                 .expect("compiling program structure should succeed");
 
             let mut workload = MeshWorkload::new();
-            workload.add_program_to_full_mesh(&mesh, compiled.program);
+            let _ = workload.add_program_to_full_mesh(&mesh, compiled.program);
 
             let err = mesh.enqueue_workload(&mut workload, true).expect_err(
                 "invalid TT compute source should surface as an enqueue/compilation error",
