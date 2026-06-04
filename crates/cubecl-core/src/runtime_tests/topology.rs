@@ -100,7 +100,55 @@ fn run_topology_axis_components_case<R: Runtime>(
     let expect_cube: Vec<u32> = (0..length).map(|index| index / cube_dim.0).collect();
     let expect_unit: Vec<u32> = (0..length).map(|index| index % cube_dim.0).collect();
 
+    if actual_absolute != expect_absolute {
+        std::println!("absolute mismatch! length = {}", actual_absolute.len());
+        for p in 0..53 {
+            let start = p * 512;
+            let end = (start + 10).min(actual_absolute.len());
+            std::println!(
+                "Page {p} (elems {start}..{end}): {:?}",
+                &actual_absolute[start..end]
+            );
+        }
+    }
+
     assert_eq!(actual_absolute, &expect_absolute);
+    if actual_cube != expect_cube {
+        std::println!("cube_pos_x mismatch! length = {}", actual_cube.len());
+        for i in 0..actual_cube.len() {
+            if actual_cube[i] != expect_cube[i] {
+                let start = i.saturating_sub(10);
+                let end = (i + 20).min(actual_cube.len());
+                std::println!(
+                    "cube mismatch at {}: actual={}, expect={}",
+                    i,
+                    actual_cube[i],
+                    expect_cube[i]
+                );
+                std::println!("cube actual window: {:?}", &actual_cube[start..end]);
+                std::println!("cube expect window: {:?}", &expect_cube[start..end]);
+                break;
+            }
+        }
+    }
+    if actual_unit != expect_unit {
+        std::println!("unit_pos_x mismatch! length = {}", actual_unit.len());
+        for i in 0..actual_unit.len() {
+            if actual_unit[i] != expect_unit[i] {
+                let start = i.saturating_sub(10);
+                let end = (i + 20).min(actual_unit.len());
+                std::println!(
+                    "unit mismatch at {}: actual={}, expect={}",
+                    i,
+                    actual_unit[i],
+                    expect_unit[i]
+                );
+                std::println!("unit actual window: {:?}", &actual_unit[start..end]);
+                std::println!("unit expect window: {:?}", &expect_unit[start..end]);
+                break;
+            }
+        }
+    }
     assert_eq!(actual_cube, &expect_cube);
     assert_eq!(actual_unit, &expect_unit);
 }
@@ -186,6 +234,27 @@ pub fn test_kernel_topology_absolute_pos<R: Runtime>(
     let actual = u32::from_bytes(&actual);
     let expect: Vec<u32> = (0..length).collect();
 
+    if actual != expect {
+        std::println!("Topology Mismatch! Length={}", length);
+        std::println!("First 50 actual: {:?}", &actual[..50.min(actual.len())]);
+        std::println!("First 50 expect: {:?}", &expect[..50.min(expect.len())]);
+        for i in 0..actual.len() {
+            if actual[i] != expect[i] {
+                std::println!(
+                    "First mismatch at index {}: actual={}, expect={}",
+                    i,
+                    actual[i],
+                    expect[i]
+                );
+                let start = i.saturating_sub(10);
+                let end = (i + 20).min(actual.len());
+                std::println!("Actual window around {}: {:?}", i, &actual[start..end]);
+                std::println!("Expect window around {}: {:?}", i, &expect[start..end]);
+                break;
+            }
+        }
+    }
+
     assert_eq!(actual, &expect);
 }
 
@@ -223,6 +292,27 @@ pub fn test_kernel_topology_absolute_pos_linearized<R: Runtime>(
     let actual = client.read_one_unchecked(handle1);
     let actual = u32::from_bytes(&actual);
     let expect: Vec<u32> = (0..length).collect();
+
+    if actual != expect {
+        std::println!("Topology linearized mismatch! Length={}", length);
+        std::println!("First 50 actual: {:?}", &actual[..50.min(actual.len())]);
+        std::println!("First 50 expect: {:?}", &expect[..50.min(expect.len())]);
+        for i in 0..actual.len() {
+            if actual[i] != expect[i] {
+                std::println!(
+                    "First mismatch at index {}: actual={}, expect={}",
+                    i,
+                    actual[i],
+                    expect[i]
+                );
+                let start = i.saturating_sub(10);
+                let end = (i + 20).min(actual.len());
+                std::println!("Actual window around {}: {:?}", i, &actual[start..end]);
+                std::println!("Expect window around {}: {:?}", i, &expect[start..end]);
+                break;
+            }
+        }
+    }
 
     assert_eq!(actual, &expect);
 }

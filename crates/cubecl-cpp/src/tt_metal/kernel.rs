@@ -15,10 +15,13 @@ pub struct TtKernelSources {
     pub io_layout: TtIoDataLayout,
     pub reader_compile_args: Vec<u32>,
     pub writer_compile_args: Vec<u32>,
+    pub reader_runtime_args: Vec<u32>,
     pub writer_runtime_args: Vec<u32>,
     pub compute_runtime_args: Vec<u32>,
     pub buffer_item_sizes: Vec<u32>,
     pub info_static_len: usize,
+    pub supports_core_partitioning: bool,
+    pub full_input_staging_tiles: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -75,10 +78,13 @@ impl TtKernelSources {
             io_layout: TtIoDataLayout::Logical,
             reader_compile_args: Vec::new(),
             writer_compile_args: Vec::new(),
+            reader_runtime_args: Vec::new(),
             writer_runtime_args: Vec::new(),
             compute_runtime_args: Vec::new(),
             buffer_item_sizes: Vec::new(),
             info_static_len: 0,
+            supports_core_partitioning: false,
+            full_input_staging_tiles: 0,
         }
     }
 
@@ -89,6 +95,16 @@ impl TtKernelSources {
     ) -> Self {
         self.reader_compile_args = reader_compile_args;
         self.writer_compile_args = writer_compile_args;
+        self
+    }
+
+    pub fn with_reader_runtime_args(mut self, reader_runtime_args: Vec<u32>) -> Self {
+        self.reader_runtime_args = reader_runtime_args;
+        self
+    }
+
+    pub fn with_full_input_staging_tiles(mut self, full_input_staging_tiles: u32) -> Self {
+        self.full_input_staging_tiles = full_input_staging_tiles;
         self
     }
 
@@ -129,6 +145,11 @@ impl TtKernelSources {
 
     pub fn with_num_tiles(mut self, num_tiles: u32) -> Self {
         self.num_tiles = num_tiles;
+        self
+    }
+
+    pub fn with_core_partitioning(mut self, supports_core_partitioning: bool) -> Self {
+        self.supports_core_partitioning = supports_core_partitioning;
         self
     }
 

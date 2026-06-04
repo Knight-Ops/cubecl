@@ -10,6 +10,32 @@ Use it as the working execution board while implementing the backend.
 - [x] Every fixed regression should add or strengthen a backend test.
 - [x] Do not start multi-core or performance work before Burn smoke validation exists.
 
+## `tt-lang` Alignment Tasks
+
+Status goal:
+Capture the reusable TT-specific lessons from `../tt-lang` so they turn into
+implementation constraints instead of tribal knowledge.
+
+Tasks:
+- [ ] Preserve an explicit TT layout contract in the backend and avoid widening
+  support that depends only on dtype/shape reconstruction when a real layout or
+  tile-type contract is required.
+- [ ] Revisit TT page-size derivation and accessor metadata with
+  `../tt-lang/lib/Dialect/TTL/Transforms/ConvertTTLToTTKernel.cpp` as the main
+  reference for future sharding/tensormap work.
+- [ ] Keep future tensor <-> shared-buffer work aligned with the explicit
+  producer-consumer DFB model in `../tt-lang/docs/sphinx/tour/dataflow-buffers.md`.
+- [ ] Keep future collective/cluster/non-1D work aligned with the launch-grid
+  versus active-work-extent split documented in
+  `../tt-lang/docs/development/PipeNets.md`.
+- [ ] Add locality-aware diagnostics or instrumentation later using the
+  `local_l1` / `remote_l1` / `dram` distinctions demonstrated by
+  `../tt-lang/examples/height_shard_gather.py`.
+- [ ] Keep future performance work focused on block shape, DST pressure, and
+  sync-region utilization using `../tt-lang/docs/development/DST_Utilization.md`
+  and `../tt-lang/lib/Dialect/TTL/Transforms/TTLScheduleOperations.cpp` as
+  references.
+
 ## Shared Support Matrix
 
 Status goal:
@@ -220,8 +246,11 @@ Tasks:
 - [x] Plane: keep the full current upstream plane suite green on hardware through the TT generic upstream warp-lowering path (`vec1`/`vec2`/`vec4` reductions, broadcasts, shuffles, and `elect`, plus `vec1` `all`/`any`/`ballot`), and keep TT-local `vec1` `elect` as a focused regression.
 - [ ] Plane/sync/collectives: keep the current synchronization subset green, including the now-proven `sync_plane` visibility case, the now-green generic upstream warp-lowering path, and the single-device identity `all_reduce` path, and treat true multi-device collective validation as the remaining dedicated semantic workstream rather than incidental follow-up from ordinary runtime tests.
 - [ ] Tensormap/cluster/cmma: leave in parity lane until their underlying TT runtime/compiler capability exists.
-- [ ] Stream: keep the reduced and medium TT-local cross-stream wrappers green, and treat the full upstream-sized stream workload as a throughput blocker on the current generic TT path until it is hardware-green without the temporary broad wrapper.
+- [ ] Stream: keep the reduced and medium TT-local cross-stream wrappers green; the backend now has explicit queued/submitted/completed stream state, page-sized host completion fences, binding-cursor/resource-lineage tracking for owned TT buffers, ordered queued-op batching, a CubeTask launch/source cache, TT `MeshDevice` program cache enabled at device startup, a multi-core generic-launch partitioning path for the runtime `kernel_cube()` flow, and a narrow one-input staged-input generic path for globally-indexed reads; a manual characterization showed the raw `Program` path did not increase `num_program_cache_entries()`, widening the TT-local same-stream batching thresholds and later adding generic worker-core partitioning were still not enough to clear the broad workload, and the staged-input 4096-element single-round probe now runs CPU-hot until a bounded 120s timeout instead of fast-failing numerically, so the remaining blocker is broad generic-runtime throughput rather than reduced-path stream correctness.
 - [ ] Burn: convert the current CubeCL subset into a tiny downstream Burn smoke before re-prioritizing later backend work.
+- [ ] Launch model: keep TT aligned with the CPU-runtime guidance by treating `CubeDim` as runtime concurrency and `CubeCount` as scheduled inner-loop work, not as a GPU-style grid.
+- [ ] Launch model: keep generated TT kernels sequential and avoid re-introducing fake SIMT scheduling assumptions while widening non-1D launch/topology support.
+- [ ] Vector/tile model: keep vectorization tied to real TT SIMD/tile capability and track upstream tile abstraction work as a future parity accelerator.
 
 Verification:
 - [ ] Each workstream has focused TT regressions before any generated category is promoted.
@@ -276,6 +305,7 @@ Scale the backend only after it is trustworthy.
 
 Tasks:
 - [ ] Design core partitioning for cube/block mapping.
+- [ ] Base that partitioning on the CPU-style launch contract: `CubeDim` should map to actual concurrent TT workers/cores, while `CubeCount` remains the schedulable work queue.
 - [ ] Add per-core tile range calculation.
 - [ ] Replace replicated-buffer assumptions where sharded memory is required.
 - [ ] Add per-core runtime args.

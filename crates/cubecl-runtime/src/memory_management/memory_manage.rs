@@ -420,6 +420,15 @@ impl<Storage: ComputeStorage> MemoryManagement<Storage> {
         Ok(slice)
     }
 
+    /// Returns the storage id from the specified binding.
+    pub fn get_storage_id(
+        &self,
+        binding: ManagedMemoryBinding,
+    ) -> Result<crate::storage::StorageId, IoError> {
+        let slice = self.find(binding)?;
+        Ok(slice.storage.id)
+    }
+
     /// Returns the storage from the specified binding
     pub fn get_storage(&mut self, binding: ManagedMemoryBinding) -> Result<StorageHandle, IoError> {
         let slice = self.find(binding)?;

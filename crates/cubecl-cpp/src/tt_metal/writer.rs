@@ -735,15 +735,17 @@ fn analyze_tt_warp_lowering(
 pub(crate) fn generate_scalar_writer_source(
     repr: &ComputeKernel<TtMetalDialect>,
     analysis: &TtKernelAnalysis,
+    full_input_staging: bool,
 ) -> String {
     let tile_units = (analysis.tile_size_bytes as usize / analysis.unit_item.size()).max(1) as u32;
     let mut src = String::new();
     let num_tiles_idx = analysis.num_outputs;
-    let num_units_idx = num_tiles_idx + 1;
-    let cube_count_x_idx = num_tiles_idx + 2;
-    let cube_count_y_idx = num_tiles_idx + 3;
-    let cube_count_z_idx = num_tiles_idx + 4;
-    let static_arg_offset_words = num_tiles_idx + 5;
+    let start_tile_idx = num_tiles_idx + 1;
+    let num_units_idx = num_tiles_idx + 2;
+    let cube_count_x_idx = num_tiles_idx + 3;
+    let cube_count_y_idx = num_tiles_idx + 4;
+    let cube_count_z_idx = num_tiles_idx + 5;
+    let static_arg_offset_words = num_tiles_idx + 6;
     let dynamic_meta_offset_words =
         (repr.info.dynamic_meta_offset / core::mem::size_of::<u32>()) as u32;
 
@@ -773,6 +775,10 @@ pub(crate) fn generate_scalar_writer_source(
     );
     let _ = writeln!(
         src,
+        "    uint32_t start_tile = get_arg_val<uint32_t>({start_tile_idx});"
+    );
+    let _ = writeln!(
+        src,
         "    uint32_t num_units = get_arg_val<uint32_t>({num_units_idx});"
     );
     let _ = writeln!(
@@ -787,6 +793,13 @@ pub(crate) fn generate_scalar_writer_source(
         src,
         "    uint32_t cube_count_z = get_arg_val<uint32_t>({cube_count_z_idx});"
     );
+    if full_input_staging {
+        let _ = writeln!(
+            src,
+            "    uint32_t staged_input_tiles = get_arg_val<uint32_t>({});",
+            static_arg_offset_words
+        );
+    }
     let _ = writeln!(src, "    constexpr uint32_t tile_units = {tile_units};");
     let _ = writeln!(
         src,
@@ -903,14 +916,22 @@ pub(crate) fn generate_scalar_writer_source(
     );
     let _ = writeln!(
         src,
-        "        uint32_t tile_start_unit = tile_idx * tile_units;"
+        "        uint32_t global_tile_idx = start_tile + tile_idx;"
+    );
+    let _ = writeln!(
+        src,
+        "        uint32_t tile_start_unit = global_tile_idx * tile_units;"
     );
     let _ = writeln!(
         src,
         "        uint32_t tile_unit_count = num_units > tile_start_unit ? std::min(tile_units, num_units - tile_start_unit) : 0;"
     );
-    for input_idx in 0..analysis.num_inputs {
-        let _ = writeln!(src, "        cb_wait_front(cb_in{input_idx}, 1);");
+    if full_input_staging {
+        let _ = writeln!(src, "        cb_wait_front(cb_in0, staged_input_tiles);");
+    } else {
+        for input_idx in 0..analysis.num_inputs {
+            let _ = writeln!(src, "        cb_wait_front(cb_in{input_idx}, 1);");
+        }
     }
 
     let has_terminate_return = repr
@@ -935,7 +956,7 @@ pub(crate) fn generate_scalar_writer_source(
         );
         let _ = writeln!(
             src,
-            "        uint64_t dst_noc_addr_out{output_idx}_prefill = c{output_idx}.get_noc_addr(tile_idx);"
+            "        uint64_t dst_noc_addr_out{output_idx}_prefill = c{output_idx}.get_noc_addr(global_tile_idx);"
         );
         let _ = writeln!(
             src,
@@ -957,16 +978,24 @@ pub(crate) fn generate_scalar_writer_source(
         if output_binding_indices.contains(&binding_index) {
             let _ = writeln!(
                 src,
-                "        {}* buffer_{} = reinterpret_cast<{}*>(get_write_ptr(cb_out{})) - tile_idx * tile_units;",
+                "        {}* buffer_{} = reinterpret_cast<{}*>(get_write_ptr(cb_out{})) - global_tile_idx * tile_units;",
                 binding.item, binding.id, binding.item, write_idx,
             );
             write_idx += 1;
         } else {
-            let _ = writeln!(
-                src,
-                "        const {}* buffer_{} = reinterpret_cast<const {}*>(get_read_ptr(cb_in{})) - tile_idx * tile_units;",
-                binding.item, binding.id, binding.item, read_idx,
-            );
+            if full_input_staging && read_idx == 0 {
+                let _ = writeln!(
+                    src,
+                    "        const {}* buffer_{} = reinterpret_cast<const {}*>(get_read_ptr(cb_in{}));",
+                    binding.item, binding.id, binding.item, read_idx,
+                );
+            } else {
+                let _ = writeln!(
+                    src,
+                    "        const {}* buffer_{} = reinterpret_cast<const {}*>(get_read_ptr(cb_in{})) - global_tile_idx * tile_units;",
+                    binding.item, binding.id, binding.item, read_idx,
+                );
+            }
             read_idx += 1;
         }
     }
@@ -996,7 +1025,7 @@ pub(crate) fn generate_scalar_writer_source(
     );
     let _ = writeln!(
         src,
-        "            uint32_t unit_idx = tile_idx * tile_units + i;"
+        "            uint32_t unit_idx = global_tile_idx * tile_units + i;"
     );
     let _ = writeln!(src, "            if (unit_idx >= num_units) break;");
     emit_builtin_locals(&mut src, &repr.flags.indexes);
@@ -1032,7 +1061,7 @@ pub(crate) fn generate_scalar_writer_source(
         );
         let _ = writeln!(
             src,
-            "        uint64_t dst_noc_addr_out{output_idx} = c{output_idx}.get_noc_addr(tile_idx);"
+            "        uint64_t dst_noc_addr_out{output_idx} = c{output_idx}.get_noc_addr(global_tile_idx);"
         );
         let _ = writeln!(
             src,
@@ -1042,6 +1071,12 @@ pub(crate) fn generate_scalar_writer_source(
     let _ = writeln!(src, "        noc_async_write_barrier();");
     for output_idx in 0..analysis.num_outputs {
         let _ = writeln!(src, "        cb_pop_front(cb_out{output_idx}, 1);");
+    }
+    if full_input_staging {
+        let _ = writeln!(src, "    }}");
+        let _ = writeln!(src, "    cb_pop_front(cb_in0, staged_input_tiles);");
+        let _ = writeln!(src, "}}");
+        return src;
     }
     for input_idx in 0..analysis.num_inputs {
         let _ = writeln!(src, "        cb_pop_front(cb_in{input_idx}, 1);");

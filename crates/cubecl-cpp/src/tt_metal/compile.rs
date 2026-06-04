@@ -79,12 +79,11 @@ pub fn compile_to_tt_sources(
 
     Ok(sources)
 }
-
 pub fn sources_from_repr(
     repr: &ComputeKernel<TtMetalDialect>,
     num_tiles: u32,
 ) -> Result<TtKernelSources, CompilationError> {
-    let analysis = analyze_kernel(repr, num_tiles)?;
+    let analysis = analyze_kernel(repr, num_tiles, None)?;
 
     let mut sources = match analysis.kind {
         SupportedComputeKind::Copy => {
@@ -171,16 +170,157 @@ pub fn sources_from_repr(
             )
         }
         SupportedComputeKind::Generic => TtKernelSources::new(
-            super::reader::generate_scalar_reader_source(analysis.num_inputs),
+            super::reader::generate_scalar_reader_source(analysis.num_inputs, false),
             super::writer::generate_noop_compute_source(),
-            super::writer::generate_scalar_writer_source(repr, &analysis),
+            super::writer::generate_scalar_writer_source(repr, &analysis, false),
             analysis.num_inputs,
             analysis.num_outputs,
             analysis.num_tiles,
             analysis.tile_size_bytes,
             analysis.data_format_tt,
             analysis.unit_item_size_bytes,
-        ),
+        )
+        .with_core_partitioning(true),
+    };
+
+    sources = sources
+        .with_binding_indices(
+            analysis.input_binding_indices,
+            analysis.output_binding_indices,
+        )
+        .with_buffer_item_sizes(analysis.buffer_item_sizes)
+        .with_info_static_len(analysis.info_static_len);
+
+    Ok(sources)
+}
+
+pub fn runtime_sources_from_repr(
+    repr: &ComputeKernel<TtMetalDialect>,
+    num_tiles: u32,
+) -> Result<TtKernelSources, CompilationError> {
+    let unit_item = select_unit_item(repr)?;
+    let (_, default_tile_size_bytes) =
+        infer_data_format_and_tile_size(normalize_buffer_elem(unit_item.elem.unpacked()))?;
+    runtime_sources_from_repr_with_page_size(repr, num_tiles, default_tile_size_bytes)
+}
+
+pub fn runtime_sources_from_repr_with_page_size(
+    repr: &ComputeKernel<TtMetalDialect>,
+    num_tiles: u32,
+    generic_tile_size_override: u32,
+) -> Result<TtKernelSources, CompilationError> {
+    runtime_sources_from_repr_with_page_size_and_staging(
+        repr,
+        num_tiles,
+        generic_tile_size_override,
+        false,
+    )
+}
+
+pub fn runtime_sources_from_repr_with_page_size_and_staging(
+    repr: &ComputeKernel<TtMetalDialect>,
+    num_tiles: u32,
+    generic_tile_size_override: u32,
+    full_input_staging: bool,
+) -> Result<TtKernelSources, CompilationError> {
+    let analysis = analyze_kernel(repr, num_tiles, Some(generic_tile_size_override))?;
+
+    let mut sources = match analysis.kind {
+        SupportedComputeKind::Copy => {
+            if analysis.num_inputs != 1 || analysis.num_outputs != 1 {
+                return Err(CompilationError::UnsupportedInstruction {
+                    reason: format!(
+                        "TT-Metal copy kernels currently require 1 input and 1 output buffer, found {} inputs and {} outputs",
+                        analysis.num_inputs, analysis.num_outputs,
+                    ),
+                    backtrace: BackTrace::capture(),
+                });
+            }
+            TtKernelSources::copy_kernel_with_format(
+                analysis.num_tiles,
+                analysis.tile_size_bytes,
+                analysis.data_format_tt,
+                analysis.unit_item_size_bytes,
+            )
+        }
+        SupportedComputeKind::Add
+        | SupportedComputeKind::Sub
+        | SupportedComputeKind::Mul
+        | SupportedComputeKind::Div => {
+            if analysis.num_inputs != 2 || analysis.num_outputs != 1 {
+                return Err(CompilationError::UnsupportedInstruction {
+                    reason: format!(
+                        "TT-Metal binary native kernels currently require 2 input buffers and 1 output buffer, found {} inputs and {} outputs",
+                        analysis.num_inputs, analysis.num_outputs,
+                    ),
+                    backtrace: BackTrace::capture(),
+                });
+            }
+            let op = match analysis.kind {
+                SupportedComputeKind::Add => TtBinaryComputeOp::Add,
+                SupportedComputeKind::Sub => TtBinaryComputeOp::Sub,
+                SupportedComputeKind::Mul => TtBinaryComputeOp::Mul,
+                SupportedComputeKind::Div => TtBinaryComputeOp::Div,
+                _ => unreachable!("binary match arm only accepts binary ops"),
+            };
+            TtKernelSources::binary_kernel_with_format(
+                op,
+                analysis.num_tiles,
+                analysis.tile_size_bytes,
+                analysis.data_format_tt,
+                analysis.unit_item_size_bytes,
+            )
+        }
+        SupportedComputeKind::Abs
+        | SupportedComputeKind::Sqrt
+        | SupportedComputeKind::Rsqrt
+        | SupportedComputeKind::Sin
+        | SupportedComputeKind::Cos
+        | SupportedComputeKind::Tan
+        | SupportedComputeKind::Tanh
+        | SupportedComputeKind::Exp
+        | SupportedComputeKind::Log => {
+            if analysis.num_inputs != 1 || analysis.num_outputs != 1 {
+                return Err(CompilationError::UnsupportedInstruction {
+                    reason: format!(
+                        "TT-Metal unary native kernels currently require 1 input buffer and 1 output buffer, found {} inputs and {} outputs",
+                        analysis.num_inputs, analysis.num_outputs,
+                    ),
+                    backtrace: BackTrace::capture(),
+                });
+            }
+            let op = match analysis.kind {
+                SupportedComputeKind::Abs => TtUnaryComputeOp::Abs,
+                SupportedComputeKind::Sqrt => TtUnaryComputeOp::Sqrt,
+                SupportedComputeKind::Rsqrt => TtUnaryComputeOp::Rsqrt,
+                SupportedComputeKind::Sin => TtUnaryComputeOp::Sin,
+                SupportedComputeKind::Cos => TtUnaryComputeOp::Cos,
+                SupportedComputeKind::Tan => TtUnaryComputeOp::Tan,
+                SupportedComputeKind::Tanh => TtUnaryComputeOp::Tanh,
+                SupportedComputeKind::Exp => TtUnaryComputeOp::Exp,
+                SupportedComputeKind::Log => TtUnaryComputeOp::Log,
+                _ => unreachable!("unary match arm only accepts unary ops"),
+            };
+            TtKernelSources::unary_kernel_with_format(
+                op,
+                analysis.num_tiles,
+                analysis.tile_size_bytes,
+                analysis.data_format_tt,
+                analysis.unit_item_size_bytes,
+            )
+        }
+        SupportedComputeKind::Generic => TtKernelSources::new(
+            super::reader::generate_scalar_reader_source(analysis.num_inputs, full_input_staging),
+            super::writer::generate_noop_compute_source(),
+            super::writer::generate_scalar_writer_source(repr, &analysis, full_input_staging),
+            analysis.num_inputs,
+            analysis.num_outputs,
+            analysis.num_tiles,
+            analysis.tile_size_bytes,
+            analysis.data_format_tt,
+            analysis.unit_item_size_bytes,
+        )
+        .with_core_partitioning(true),
     };
 
     sources = sources
@@ -197,6 +337,7 @@ pub fn sources_from_repr(
 fn analyze_kernel(
     repr: &ComputeKernel<TtMetalDialect>,
     requested_num_tiles: u32,
+    generic_tile_size_override: Option<u32>,
 ) -> Result<TtKernelAnalysis, CompilationError> {
     if !repr.tensor_maps.is_empty() {
         return Err(unsupported_reason(
@@ -273,7 +414,7 @@ fn analyze_kernel(
     }
 
     let unit_item = select_unit_item(repr)?;
-    let (data_format_tt, tile_size_bytes) =
+    let (data_format_tt, mut tile_size_bytes) =
         infer_data_format_and_tile_size(normalize_buffer_elem(unit_item.elem.unpacked()))?;
     let buffer_item_sizes = repr
         .buffers
@@ -334,6 +475,12 @@ fn analyze_kernel(
         | SupportedComputeKind::Log => SupportedComputeKind::Generic,
         SupportedComputeKind::Generic => SupportedComputeKind::Generic,
     };
+    if matches!(kind, SupportedComputeKind::Generic) {
+        if let Some(override_bytes) = generic_tile_size_override {
+            tile_size_bytes = override_bytes.clamp(unit_item.size() as u32, tile_size_bytes.max(1));
+        }
+    }
+
     let num_tiles = match kind {
         SupportedComputeKind::Copy
         | SupportedComputeKind::Add

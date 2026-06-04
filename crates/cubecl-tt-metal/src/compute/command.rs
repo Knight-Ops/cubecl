@@ -100,13 +100,21 @@ impl<'a> Command<'a> {
         Ok(resource)
     }
 
-    fn flush_pending_stream(&mut self, stream_id: &cubecl_common::stream_id::StreamId) -> Result<(), IoError> {
-        self.streams
-            .get(stream_id)
-            .flush_pending_workload()
+    fn complete_resource_lineage(&mut self, resource: &TtResource) -> Result<(), IoError> {
+        let stream = self.streams.get(&resource.owner_stream);
+        let target_seq = stream.latest_resource_seq(resource.storage_id);
+        if target_seq == 0 {
+            return Ok(());
+        }
+        stream.mark_readback_completion();
+        stream
+            .sync_through(target_seq)
             .map_err(|err| IoError::Unknown {
                 backtrace: BackTrace::capture(),
-                description: format!("failed to flush pending TT workload on stream {stream_id}: {err:?}"),
+                description: format!(
+                    "failed to complete TT resource lineage on stream {}: {err:?}",
+                    resource.owner_stream
+                ),
             })
     }
 
@@ -141,7 +149,7 @@ impl<'a> Command<'a> {
             });
         }
 
-        self.flush_pending_stream(&resource.owner_stream)?;
+        self.complete_resource_lineage(resource)?;
 
         let stream = self.streams.get(&resource.owner_stream);
         let storage = &mut stream.memory_management_gpu;
@@ -184,7 +192,7 @@ impl<'a> Command<'a> {
         }
 
         if resource.allocation_offset != 0 || bytes.len() as u64 != resource.allocation_size {
-            self.flush_pending_stream(&resource.owner_stream)?;
+            self.complete_resource_lineage(resource)?;
         }
 
         let stream = self.streams.get(&resource.owner_stream);
@@ -236,7 +244,8 @@ impl<'a> Command<'a> {
         })?;
         if !staged.is_empty() {
             let write_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                self.mesh.write_mesh_buffer_with_mode(&mesh_buffer, staged, false)
+                self.mesh
+                    .write_mesh_buffer_with_mode(&mesh_buffer, staged, false)
             }));
             match write_result {
                 Ok(Ok(())) => {}
@@ -522,16 +531,28 @@ impl<'a> Command<'a> {
         output_addrs: &[u32],
         logger: Arc<ServerLogger>,
     ) -> Result<(), LaunchError> {
-        let compiled = self
-            .ctx
-            .compile_kernel(sources, input_addrs, output_addrs, logger)?;
+        // Keep the low-level direct-source path conservative for now.
+        // The broad stream work we are optimizing lives on `kernel_cube()`,
+        // while direct-source tests like `cubetask_compile_pipeline` expect
+        // the historical single-core behavior.
+        let compiled = self.ctx.compile_kernel(
+            self.mesh,
+            sources,
+            input_addrs,
+            output_addrs,
+            logger,
+            false,
+        )?;
         let target = TtLaunchTarget::FullMesh;
 
         let mut workload = libtt_metal_cxx::MeshWorkload::new();
         self.add_program_to_workload(&mut workload, compiled.program, target)?;
 
         catch_launch_panic("enqueue_workload failed", || {
-            self.mesh.enqueue_workload(&mut workload, false)
+            // The low-level direct-source path is expected to behave synchronously.
+            // Some characterization tests read through `server.mesh()` immediately after
+            // launch, so keep this path blocking while `kernel_cube()` remains deferred.
+            self.mesh.enqueue_workload(&mut workload, true)
         })?;
 
         Ok(())
@@ -552,10 +573,12 @@ impl<'a> Command<'a> {
                 .prepare_cube_task_launch(cube_kernel, mode, count, resources, info)?;
         let (prepared, bridge) = self.bridge_prepared_launch(prepared, resources)?;
         let compiled = self.ctx.compile_kernel(
+            self.mesh,
             &prepared.sources,
             &prepared.input_addrs,
             &prepared.output_addrs,
             logger,
+            true,
         )?;
         let target = self.launch_target_for_resources(resources)?;
 
@@ -569,40 +592,29 @@ impl<'a> Command<'a> {
             self.finish_tiled_launch_bridge(bridge)?;
         } else {
             match target {
-                TtLaunchTarget::FullMesh => self
-                    .streams
-                    .current()
-                    .enqueue_full_mesh_program(compiled.program)
-                    .map_err(|err| LaunchError::Unknown {
-                        reason: format!("failed to queue TT workload program: {err:?}"),
-                        backtrace: BackTrace::capture(),
-                    })?,
+                TtLaunchTarget::FullMesh => {
+                    let seq = self
+                        .streams
+                        .current()
+                        .enqueue_full_mesh_program(compiled.program)
+                        .map_err(|err| LaunchError::Unknown {
+                            reason: format!("failed to queue TT workload program: {err:?}"),
+                            backtrace: BackTrace::capture(),
+                        })?;
+                    let outputs = prepared.bindings.iter().zip(resources.iter()).filter_map(
+                        |(binding, resource)| {
+                            matches!(
+                                binding.visibility,
+                                cubecl_runtime::kernel::Visibility::ReadWrite
+                            )
+                            .then_some(resource.storage_id)
+                        },
+                    );
+                    self.streams.current().note_workload_outputs(seq, outputs);
+                }
             }
         }
         Ok(())
-    }
-}
-
-fn mesh_write_buffer(
-    mesh: &libtt_metal_cxx::MeshDevice,
-    mesh_buffer: &libtt_metal_cxx::MeshBuffer,
-    staged: &[u8],
-    context: &'static str,
-    blocking: bool,
-) -> Result<(), IoError> {
-    let write_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        mesh.write_mesh_buffer_with_mode(mesh_buffer, staged, blocking)
-    }));
-    match write_result {
-        Ok(Ok(())) => Ok(()),
-        Ok(Err(e)) => Err(IoError::Unknown {
-            backtrace: BackTrace::capture(),
-            description: format!("{context}: {}", e.what()),
-        }),
-        Err(_panic) => Err(IoError::Unknown {
-            backtrace: BackTrace::capture(),
-            description: format!("{context}: TT-Metal host call panicked"),
-        }),
     }
 }
 

@@ -1,6 +1,0 @@
-0: blank
-3: /home/carl/.cache/tt-metal-cache/7480443082328483327/kernels/cq_dispatch_subordinate/7227152901424362888//ncrisc/ncrisc.elf
-1: /home/carl/.cache/tt-metal-cache/7480443082328483327/kernels/cq_prefetch/11681118040740904905//brisc/brisc.elf
-2: /home/carl/.cache/tt-metal-cache/7480443082328483327/kernels/cq_dispatch/304047669242341916//brisc/brisc.elf
-5: /home/carl/.cache/tt-metal-cache/7480443082328483327/kernels/Kernel_Source_Code/17216694692043863005//brisc/brisc.elf
-4: /home/carl/.cache/tt-metal-cache/7480443082328483327/kernels/Kernel_Source_Code/17472717039781710656//ncrisc/ncrisc.elf

@@ -11,7 +11,7 @@ What is true today:
 - TT compile-time args and launch metadata now flow from real `MeshBuffer` metadata and logical resource sizes instead of hardcoded values.
 - TT source generation supports a narrow generic single-core scalar path for bounds-checked elementwise kernels and global reinterpret-style kernels, in addition to the existing copy/add path.
 - Unsupported Phase 1 kernels now fail during compilation with explicit `CompilationError::UnsupportedInstruction` errors.
-- The full TT-local hardware-gated suite in `cubecl-tt-metal` is green end-to-end on real hardware (`280` tests in the current inventory).
+- The full TT-local hardware-gated suite in `cubecl-tt-metal` is green end-to-end on real hardware (`289` tests in the current inventory).
 - The `cubecl_std` `trigonometry`, global `reinterpret_slice`, current `event`, TT-local `tensor_identity`, and TT-local `quantized_view` coverage now run through TT.
 
 What is not true yet:
@@ -22,6 +22,70 @@ What is not true yet:
 - A targeted TT-local `cubecl_core` subset is enabled and green on hardware, including numeric define coverage, sliced-array scalar indexing, scalar-kernel-argument branching, the vector `assign` case needed by the current harness, launch-untyped dynamic addressing, TT helper-call debug coverage, and opportunistic `to_client` coverage.
 - Burn training has not been validated downstream.
 - Multi-core/sharding/performance work is still out of scope.
+
+## Upstream Launch-Model Guidance
+
+The most actionable guidance from Burn/CubeCL maintainers so far is:
+- TT should follow the **CPU runtime launch model**, not invent a fake GPU grid model.
+- `CubeDim` is host-side concurrency and should stay **small**, matching the actual concurrent TT workers/cores the runtime exposes.
+- `CubeCount` should be treated as **scheduled work injected by the runtime**, not as baked-in SIMT grid structure in generated kernels.
+- Generated kernel code should stay **sequential**; concurrency belongs to runtime scheduling.
+- Vectorization should map to **real SIMD/tile capability**, not be used as a stand-in for launch geometry.
+- Planned upstream **tile abstractions** are expected to reduce part of the mismatch between CubeCL element semantics and TT native 32×32 tiled execution.
+
+This guidance is the reference point for the remaining non-1D launch, topology, and multi-core planning below.
+
+## Reference Findings From `tt-lang`
+
+A review of `../tt-lang` is worth treating as standing implementation guidance
+for this backend, because it solves several of the same TT-specific abstraction
+problems more explicitly than CubeCL currently does.
+
+Key takeaways:
+- **Require explicit layout metadata.** `tt-lang` rejects tensor/CB lowering
+  when the tensor lacks `ttl.layout`, and it derives page size from the layout's
+  tile element type. That is a better long-term contract than reconstructing TT
+  layout only from logical shape or scalar dtype.
+- **Treat TensorAccessor metadata as a real ABI.** Their lowering keeps
+  interleaved-vs-sharded accessor information and CTA-offset chaining explicit.
+  This is directly relevant to future tensormap, sharding, and non-trivial TT
+  memory-layout work.
+- **Treat tensor/CB movement as explicit producer-consumer flow.** `tt-lang`'s
+  DFB model uses explicit reserve/wait/push/pop semantics and a documented
+  `block_count` contract. That should inform future TT stream, shared-memory,
+  and tensormap work here.
+- **Keep launch grid separate from work extent.** Their PipeNet verifier models
+  a larger launch than the active communication region and requires guards on
+  nodes outside the active set. That is a strong reference for future
+  non-1D, collective, cluster, and subgroup work in this backend.
+- **Optimize around block shape and sync regions.** Their DST utilization work
+  is framed around per-node block shape, tiles per acquire/release region,
+  subblocking, and op scheduling by kind/init-affinity. That is the right mental
+  model for future TT performance work on our side too.
+- **Preserve locality distinctions.** The `height_shard_gather` example treats
+  local L1, remote L1, and DRAM as separately meaningful access classes. That is
+  useful guidance for future diagnostics and stream/tensormap instrumentation.
+
+Concrete references:
+- `../tt-lang/lib/Dialect/TTL/Transforms/ConvertTTLToTTKernel.cpp`
+- `../tt-lang/lib/Dialect/TTL/IR/TTLOps.cpp`
+- `../tt-lang/lib/Dialect/TTL/Transforms/TTLScheduleOperations.cpp`
+- `../tt-lang/docs/development/DST_Utilization.md`
+- `../tt-lang/docs/sphinx/tour/dataflow-buffers.md`
+- `../tt-lang/docs/development/PipeNets.md`
+- `../tt-lang/examples/height_shard_gather.py`
+- `../tt-lang/examples/group_transfer_upsample.py`
+
+Implications for `cubecl-tt-metal`:
+- future TT layout widening should prefer an explicit layout/page-size contract
+  over dtype-only reconstruction
+- future sharding/tensormap work should preserve explicit accessor metadata
+- future stream/shared-buffer work should continue to model producer-consumer
+  ownership explicitly
+- future collective/cluster work should separate launch shape from active work
+  extent instead of assuming the whole launch participates
+- future performance work should target tiles-per-sync-region and block-shape
+  scheduling, not just generic host-side batching
 
 ## Shared Support Matrix
 
@@ -67,7 +131,7 @@ Keep this matrix aligned with the TT harness comment in `crates/cubecl-tt-metal/
 | `saturating` | enabled in TT-local `i32`/`u32` wrappers | none in the current integer subset | keep the narrow wrappers green before widening integer coverage further |
 | `sequence` | enabled | none in the current upstream sequence suite | keep the full sequence suite green and route any sequence-lowering regressions into focused TT tests |
 | `slice` | enabled | none in the current upstream slice suite | keep the full slice suite green and route any loop-lowering regressions into focused TT tests |
-| `stream` | partially enabled in TT-local wrappers | the reduced and medium single-device cross-stream wrappers are now green on hardware after fixing cross-stream resource ownership, but the full upstream-sized stream workload still stalls and wider stream-facing runtime semantics remain under-validated | keep `test_stream_small` and `test_stream_medium` green in isolation and in the full TT lane, then revisit the full upstream stream workload with focused runtime/queue instrumentation |
+| `stream` | partially enabled in TT-local wrappers | the reduced and medium single-device cross-stream wrappers are green on hardware, and the TT backend now has explicit queued/submitted/completed stream state, page-sized host completion fences, binding-cursor/resource-lineage tracking for owned TT buffers, queued-op batching, a CubeTask launch/source cache, TT `MeshDevice` program cache enabled at device startup, and a multi-core generic-launch partitioning path for the runtime `kernel_cube()` flow; a manual characterization showed the raw `Program` path did not increase `num_program_cache_entries()`, the full upstream-sized stream workload still timed out under a bounded 180s hardware probe, a follow-up run with much more permissive same-stream batching thresholds still timed out, and a later probe after generic worker-core partitioning still timed out; a newer one-input staged-input path keeps `test_stream_small` and `test_stream_medium` green and changes the 4096-element single-round probe from a fast wrong-answer failure into a long CPU-hot run that still times out under a bounded 120s probe, so the remaining blocker has narrowed further to generic scalar runtime throughput under large globally-indexed workloads | keep `test_stream_small` and `test_stream_medium` green in isolation and in the full TT lane, then continue broad stream work as a generic-runtime throughput optimization problem with the staged-input path as the current correctness baseline |
 | `synchronization` | partially enabled in TT-local wrappers | `sync_cube`, `finished_sync_cube`, `sync_cube_shared`, and the current `sync_plane` visibility subset are green on hardware through the generic writer's shared-scratch execution model; broader plane/subgroup synchronization semantics are still not modeled | keep the current synchronization subset green and defer broader subgroup-dependent synchronization until plane semantics are real |
 | `tensor` | enabled in a TT-local wrapper | the current upstream `test_tensor_coordinate` case is green through the narrow 2D single-cube-count launch model; broader multidimensional cube-count semantics are still not claimed | keep `test_tensor_coordinate` green and only widen tensor geometry parity after broader non-1D launch semantics are hardware-validated |
 | `tensormap` | parity lane | tensor maps are explicitly outside the current TT subset | defer until tensor-map support is real |
@@ -213,6 +277,10 @@ Implementation plan:
   - full upstream absolute-position coverage is green
   - 3D cube-count decomposition is green for `CUBE_POS_X` / `CUBE_POS_Y` / `CUBE_POS_Z`
   - `cube_dim.y > 1`, `z = 1` decomposition is green for 2D `UNIT_POS_X` / `UNIT_POS_Y` and `tensor_coordinate`
+- Preserve the CPU-style launch contract explicitly:
+  - `CubeDim` represents runtime concurrency, not a GPU-style logical grid
+  - `CubeCount` remains scheduled work that the runtime can push into inner loops
+  - generated TT kernel bodies stay sequential instead of encoding fake SIMT scheduling assumptions
 - Revisit non-1D semantics in this order:
   - wider tensor geometry cases that depend on broader shared-state or multidimensional semantics
   - broader shared-memory/barrier interactions with non-1D launch
@@ -233,6 +301,7 @@ Why this is blocked today:
 Implementation plan:
 - Treat these as a research workstream, not opportunistic bug-fixing.
 - First identify which subgroup semantics TT kernel APIs can actually express.
+- Keep the maintainer guidance in mind here: vectorization should represent TT SIMD/tile behavior, while concurrency should stay in the runtime launch model.
 - Only then decide whether these categories are backend work or permanent exclusions for this backend shape.
 
 Acceptance gate:

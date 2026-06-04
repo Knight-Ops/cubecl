@@ -44,6 +44,37 @@ The broad workload was rerun after also removing TT hot-path debug printing from
 
 ## What Has Already Been Tried
 
+## Newly Landed Stream-State Improvements
+
+The latest implementation pass tightened the TT stream/runtime seam in a more
+resource-centric way instead of adding a second scheduler:
+
+- `EventStreamBackend::handle_cursor` for TT is no longer a dummy `0`; it now
+  surfaces a real binding cursor using CubeCL runtime memory metadata and TT's
+  per-resource latest-sequence tracking.
+- The TT stream backend now tracks the latest queued sequence for each owned
+  `StorageId`, so shared-binding analysis can see newer producer work on an
+  already-bound allocation.
+- TT readback and partial-write paths now complete only through the relevant
+  owned resource lineage instead of pessimistically fencing the entire owner
+  stream.
+- TT `kernel_cube()` launches now mark their output resources with the queued
+  workload sequence, so later cross-stream use sees the freshest producer state
+  through existing CubeCL runtime machinery.
+
+This is a better fit for both Rust and CubeCL than inventing a second dependency
+tracker because it reuses the runtime's existing shared-binding analysis and
+turns TT-specific ownership/completion knowledge into a backend-native cursor.
+
+Result:
+- `test_stream_small` is still green on hardware
+- `test_stream_medium` is still green on hardware
+- `cubetask_compile_pipeline` is still green on hardware
+- the full serial TT lane is still green at `288 passed; 0 failed`
+- the broad upstream-sized `stream` workload still timed out under a bounded
+  180-second hardware probe, including a re-run after enabling TT `MeshDevice`
+  program cache at device startup
+
 ### 1. Wrapper-level promotion of upstream `stream`
 
 A TT wrapper for the upstream stream runtime test was added temporarily in [lib.rs](./src/lib.rs), compiled successfully, and then hardware-tested.
@@ -147,6 +178,70 @@ It is more specifically:
 - define truthful ordering semantics for CubeCL logical streams
 - map that onto TT’s submission/runtime model
 - make cross-stream shared bindings visible without inventing fake async guarantees
+
+## Relevant `tt-lang` Findings
+
+The review of `../tt-lang` does not immediately remove the current TT stream
+throughput blocker, but it does sharpen how we should think about the remaining
+runtime and memory-model work:
+
+- **Receiver-owned destination storage is the right default mental model.**
+  `tt-lang`'s PipeNet semantics explicitly say the pipe has no hidden payload
+  DFB; the receiver reserves destination storage and the sender writes directly
+  into that receiver-owned block. That lines up with the owner-stream fix we had
+  to make in this backend and is a good reference for future stream/tensormap
+  work. Source: `../tt-lang/docs/development/PipeNets.md`.
+- **DFB/block semantics matter more than generic async-stream intuition.**
+  Their dataflow-buffer model is explicit about blocking `reserve`/`wait`,
+  non-blocking `push`/`pop`, and double buffering as the default. That supports
+  our current approach of modeling TT stream semantics at the host/runtime
+  boundary rather than trying to imitate CUDA events. Source:
+  `../tt-lang/docs/sphinx/tour/dataflow-buffers.md`.
+- **Launch shape is not the same as active participants.** Their verifier keeps
+  launch grid separate from the active work extent and requires guards around
+  communication work. That is relevant to future collective/cluster work and to
+  making non-1D/multi-core TT behavior honest. Source:
+  `../tt-lang/docs/development/PipeNets.md`.
+- **Performance work should target sync regions and block shape.** Their DST
+  planning and scheduling work reinforces that TT throughput is often about
+  tiles-per-sync-region, block shape, and eliminating redundant init/sync costs
+  rather than about inventing finer-grained logical concurrency. Sources:
+  `../tt-lang/docs/development/DST_Utilization.md`,
+  `../tt-lang/lib/Dialect/TTL/Transforms/TTLScheduleOperations.cpp`.
+
+## TT Program Cache Follow-up
+
+We confirmed that a meaningful chunk of TT launch overhead still sits below the
+current CubeCL cache layer:
+
+- `TtContext` already caches CubeCL-side lowering and generated TT sources, but
+  `compile_kernel()` still rebuilds a fresh TT `Program`, recreates CBs, and
+  recreates reader/writer/compute kernels for each launch. Source: [src/compute/context.rs](./src/compute/context.rs).
+- TT-Metal's distributed `MeshDevice` already exposes a native program cache via
+  `enable_program_cache`, `clear_program_cache`, `disable_and_clear_program_cache`,
+  and `num_program_cache_entries`.
+- That API is now exposed through `libtt-metal-cxx` and enabled at TT device
+  startup in [src/runtime.rs](./src/runtime.rs).
+- There is now a focused TT characterization test,
+  `tt_program_cache_populates_for_cubetask_pipeline`, but it is kept manual/
+  ignored because the current raw `Program`/`launch_from_sources` path did not
+  increase `MeshDevice::num_program_cache_entries()` even with program cache
+  enabled. That result is useful, but it is not suitable as a normal green-suite
+  assertion yet.
+
+What this means:
+- We now have both CubeCL-side source caching and TT-side program caching enabled
+  on the ordinary runtime path.
+- This is not the same as reusing a prepared `Program` object directly in
+  `cubecl-tt-metal`; it relies on TT-Metal's own program-cache layer under the
+  current launch path.
+- The first low-level characterization showed that the raw
+  `Program`/`launch_from_sources` path did not increase
+  `MeshDevice::num_program_cache_entries()`, so the device cache may not be the
+  relevant reuse layer for this part of the backend.
+- That means the broad upstream-sized `stream` throughput blocker should still
+  be treated primarily as a submission/completion-path problem until a broader
+  runtime-path measurement proves otherwise.
 
 ## Documentation References
 
@@ -357,7 +452,107 @@ After the ownership fix, `tests::cubecl_core_wrappers::stream::test_stream_small
 
 Observed behavior:
 - the broad TT wrapper for `cubecl_core::runtime_tests::stream::test_stream::<TestRuntime, f32>` was re-enabled temporarily
-- the process remained alive for multiple minutes without test output
-- process-state sampling showed the test binary blocked in `futex_wait_queue` rather than consuming CPU like an active long-running kernel chain
+- the TT stream backend now has explicit queued/submitted/completed sequence tracking, page-sized host completion fences, conditional completion at readback/sync boundaries, in-order queued-op batching, adjacent full-mesh program coalescing, and a `CubeTask` launch/source cache in `TtContext`
+- `tests::cubecl_core_wrappers::stream::test_stream_small` and `tests::cubecl_core_wrappers::stream::test_stream_medium` remain green on real hardware after those changes
+- `tests::cubetask_compile_pipeline` also remains green, which confirms the direct-source `kernel()` path stayed immediate
+- the broad workload still remained alive for tens of seconds without test completion and process-state sampling still showed an active CPU-hot worker thread rather than a parked dependency deadlock
+- a later structural probe added worker-core partitioning for the generic `kernel_cube()` runtime path while keeping the direct-source `kernel()` path synchronous; `test_stream_small`, `test_stream_medium`, and `cubetask_compile_pipeline` all stayed green, but the broad wrapper still timed out at the same bounded 180s probe
+- a newer staged-input generic path now preserves globally-indexed reads from a single input by staging the full logical input buffer into TT L1/CB storage for small one-input cases; `test_stream_small` and `test_stream_medium` remain green with that path enabled, and a focused 4096-element single-round probe no longer fails immediately with a wrong value but instead runs CPU-hot until a bounded 120s timeout, which suggests the remaining blocker has shifted back to generic scalar runtime throughput rather than the earlier multi-page input-correctness bug
 
-This is the current blocker for full stream parity.
+This is the current blocker for full stream parity: the remaining cost is now in the broad workload's host write / submission / completion throughput, not in cross-stream correctness, TT event semantics, repeated CubeTask codegen, or simple same-kernel worker-core fan-out alone.
+
+## Burn Smoke Blocker
+
+### Summary
+
+The next downstream milestone was a Burn smoke test in the sibling repo at `/home/carl/projects/burn`, wired against the local CubeCL/TT backend instead of Burn's pinned git revision.
+
+That work is currently blocked by broad API drift between:
+- Burn's pinned `burn-cubecl` / `cubek` stack
+- the current local CubeCL head in this repo
+
+This is a build-time compatibility problem, not a TT hardware-runtime correctness problem.
+
+### What was attempted
+
+The Burn repo was patched to consume local CubeCL crates:
+- `cubecl`
+- `cubecl-common`
+- `cubecl-zspace`
+
+TT-specific backend plumbing was also added on the Burn side so a smoke test could target:
+- `burn_cubecl::CubeBackend<cubecl_tt_metal::TtRuntime>`
+- `burn_autodiff::Autodiff<CubeBackend<TtRuntime>>`
+
+Two smoke-test directions were tried:
+- a higher-level backend smoke using Burn backend traits
+- a reduced "minimal mode" attempt to compile `burn-cubecl` without `cubek`, keeping only the elementwise/autodiff path needed for a scalar training-step smoke
+
+### First blocker: `cubek` version skew
+
+With Burn patched to the local CubeCL crates, the first build failure came from Burn's pinned `cubek` revision:
+- `cubek` at `006a0ed2e9fce76ca1a87fe7687227a0db49e9cd`
+- Burn's pinned `cubecl` revision at `1d628d7e8fa6ac27c67195b35736de0b63cc2839`
+
+That `cubek` revision does not compile against the local CubeCL head.
+
+### Second blocker: `burn-cubecl` itself is also out of sync
+
+Even after trying to bypass `cubek` with a reduced Burn-side feature mode, `burn-cubecl` itself still has broad frontend/kernel API drift against the local CubeCL head.
+
+Concrete incompatibility classes from the compile:
+- missing view aliases and changed signatures:
+  - `cubecl::std::tensor::layout::linear::LinearViewMut`
+- changed frontend helpers and intrinsic methods:
+  - `Vector::mod_floor`
+  - `Vector::extract`
+  - `Vector::vec_and`
+  - `Sequence::reversed`
+  - `Shared::new_slice`
+  - `TensorArg::into_buffer_arg`
+- changed expansion helpers and generated-method names:
+  - `__expand_as_type`
+  - `__expand_as_mut_slice_method`
+  - related cube-macro generated compatibility surface
+- changed kernel expectations around comparisons and references
+- structural coupling where `Backend` supertraits still require module/quantized ops to exist, even for a reduced smoke path
+
+This means the Burn smoke is not blocked on one or two missing methods. It is blocked on a wider Burn `burn-cubecl` to CubeCL compatibility layer that no longer matches current CubeCL.
+
+### Current assessment
+
+The TT backend is healthy enough for a downstream smoke in principle:
+- the local TT hardware suite remains green
+- reduced and medium stream parity are green
+- the single-device backend surface is broad and hardware-validated
+
+But the Burn smoke cannot honestly be completed until one of these happens:
+1. Burn's `burn-cubecl` is forward-ported to the current CubeCL frontend/kernel API.
+2. The local CubeCL branch grows a compatibility shim surface for the older Burn `burn-cubecl` expectations.
+3. Burn is checked out at a revision that already matches the local CubeCL branch.
+
+### Best next step
+
+The best next step is not more TT runtime debugging.
+
+It is choosing a compatibility strategy for Burn:
+- either pin Burn to a CubeCL-compatible revision
+- or intentionally port Burn's `burn-cubecl` to the current CubeCL APIs
+
+Until that is decided, Burn smoke work is blocked by frontend/backend API skew rather than by TT-specific execution bugs.
+
+
+## Upstream Architecture Guidance
+
+A useful maintainer conversation clarified a few architectural points that should guide future TT work:
+- TT does **not** need a fake GPU-style grid model to fit CubeCL.
+- The recommended launch reference is the **CPU runtime**:
+  - `CubeDim` is host-side concurrency
+  - `CubeCount` is schedulable work injected by the runtime
+  - generated kernel bodies should stay sequential
+- TT-specific vectorization should represent **real SIMD/tile behavior**, not logical launch geometry.
+- Upcoming upstream **tile abstractions** are expected to help map CubeCL semantics onto TT’s native 32×32 tiled execution model.
+- TT data movement remains a real constraint: moving data across cores means going through the NoC, and each Tensix core is better thought of as coordinated reader / decode / math / encode / writer roles than as a conventional GPU lane group.
+
+Actionable consequence:
+- when future blockers involve `ABSOLUTE_POS`, `CUBE_POS`, non-1D launch geometry, or multi-core scheduling, the first question should be whether the backend is drifting away from this CPU-style launch model rather than whether it is matching CUDA/HIP behavior.

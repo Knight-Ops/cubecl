@@ -56,8 +56,19 @@ mod tests {
 
         if env::var_os(TT_HARDWARE_SUBPROCESS_ENV).is_some() {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(test));
-            let status = if result.is_ok() { 0 } else { 101 };
-            unsafe { _exit(status) }
+            match result {
+                Ok(()) => unsafe { _exit(0) },
+                Err(payload) => {
+                    if let Some(message) = payload.downcast_ref::<String>() {
+                        eprintln!("TT hardware subprocess panic: {}", message);
+                    } else if let Some(message) = payload.downcast_ref::<&str>() {
+                        eprintln!("TT hardware subprocess panic: {}", message);
+                    } else {
+                        eprintln!("TT hardware subprocess panic: non-string payload");
+                    }
+                    unsafe { _exit(101) }
+                }
+            }
         }
 
         let test_name = std::thread::current()
@@ -357,17 +368,35 @@ stderr:
             use super::*;
 
             #[test]
-            fn test_absolute_pos() {
+            fn test_absolute_pos_u32() {
                 with_tt_hardware_test_client(|client| {
                     cubecl_core::runtime_tests::topology::test_kernel_topology_absolute_pos::<
                         TestRuntime,
-                    >(client.clone(), AddressType::U32);
+                    >(client, AddressType::U32);
+                });
+            }
+
+            #[test]
+            fn test_absolute_pos_u64() {
+                with_tt_hardware_test_client(|client| {
                     cubecl_core::runtime_tests::topology::test_kernel_topology_absolute_pos::<
                         TestRuntime,
-                    >(client.clone(), AddressType::U64);
+                    >(client, AddressType::U64);
+                });
+            }
+
+            #[test]
+            fn test_absolute_pos_linearized_u32() {
+                with_tt_hardware_test_client(|client| {
                     cubecl_core::runtime_tests::topology::test_kernel_topology_absolute_pos_linearized::<
                         TestRuntime,
-                    >(client.clone(), AddressType::U32);
+                    >(client, AddressType::U32);
+                });
+            }
+
+            #[test]
+            fn test_absolute_pos_linearized_u64() {
+                with_tt_hardware_test_client(|client| {
                     cubecl_core::runtime_tests::topology::test_kernel_topology_absolute_pos_linearized::<
                         TestRuntime,
                     >(client, AddressType::U64);
@@ -375,11 +404,17 @@ stderr:
             }
 
             #[test]
-            fn test_axis_components_linearized() {
+            fn test_axis_components_linearized_u32() {
                 with_tt_hardware_test_client(|client| {
                     cubecl_core::runtime_tests::topology::test_kernel_topology_axis_components_linearized::<
                         TestRuntime,
-                    >(client.clone(), AddressType::U32);
+                    >(client, AddressType::U32);
+                });
+            }
+
+            #[test]
+            fn test_axis_components_linearized_u64() {
+                with_tt_hardware_test_client(|client| {
                     cubecl_core::runtime_tests::topology::test_kernel_topology_axis_components_linearized::<
                         TestRuntime,
                     >(client, AddressType::U64);
@@ -1213,7 +1248,6 @@ stderr:
                     cubecl_core::runtime_tests::stream::test_stream_medium::<TestRuntime>(client);
                 });
             }
-
         }
 
         mod synchronization {
@@ -4185,18 +4219,39 @@ stderr:
                 return;
             }
             let mesh = test_mesh();
-            const BUF_SIZE: u64 = 4096;
-            let buf = MeshBuffer::create_replicated(&mesh, BUF_SIZE, BUF_SIZE, 0)
-                .expect("buffer should allocate");
+            let size = 108544;
+            let page_size = 2048;
+            let buf0 = MeshBuffer::create_replicated(&mesh, size, page_size, 0).unwrap();
+            let buf1 = MeshBuffer::create_replicated(&mesh, size, page_size, 0).unwrap();
+            let buf2 = MeshBuffer::create_replicated(&mesh, size, page_size, 0).unwrap();
+            let input0 = (0..size).map(|i| (i % 251) as u8).collect::<Vec<_>>();
+            let input1 = (0..size)
+                .map(|i| ((i.wrapping_mul(3) + 17) % 251) as u8)
+                .collect::<Vec<_>>();
+            let input2 = (0..size)
+                .map(|i| ((i.wrapping_mul(7) + 29) % 251) as u8)
+                .collect::<Vec<_>>();
 
-            let mut input = vec![0u8; BUF_SIZE as usize];
-            for i in 0..BUF_SIZE as usize {
-                input[i] = (i % 251 + 1) as u8;
-            }
-            mesh.write_mesh_buffer(&buf, &input).expect("write");
-            let mut output = vec![0u8; BUF_SIZE as usize];
-            mesh.read_mesh_buffer(&buf, &mut output).expect("read");
-            assert_eq!(input, output, "raw buffer write/read round-trip");
+            mesh.write_mesh_buffer(&buf0, &input0)
+                .expect("buffer 0 write should succeed");
+            mesh.write_mesh_buffer(&buf1, &input1)
+                .expect("buffer 1 write should succeed");
+            mesh.write_mesh_buffer(&buf2, &input2)
+                .expect("buffer 2 write should succeed");
+
+            let mut output0 = vec![0u8; size as usize];
+            let mut output1 = vec![0u8; size as usize];
+            let mut output2 = vec![0u8; size as usize];
+            mesh.read_mesh_buffer(&buf0, &mut output0)
+                .expect("buffer 0 read should succeed");
+            mesh.read_mesh_buffer(&buf1, &mut output1)
+                .expect("buffer 1 read should succeed");
+            mesh.read_mesh_buffer(&buf2, &mut output2)
+                .expect("buffer 2 read should succeed");
+
+            assert_eq!(output0, input0);
+            assert_eq!(output1, input1);
+            assert_eq!(output2, input2);
         });
     }
 
@@ -4226,6 +4281,61 @@ stderr:
 
     // ── Phase 5d: CubeTask compilation pipeline ─────────────────────────
     // Tests compile_cube_task by wrapping a KernelDefinition in a CubeTask.
+    fn run_cubetask_compile_pipeline(mesh: &MeshDevice) {
+        const TILE_SIZE: u32 = 32 * 32 * 2;
+        const NUM_TILES: u32 = 2;
+        const BUF_SIZE: u64 = NUM_TILES as u64 * TILE_SIZE as u64;
+
+        let input_buf = MeshBuffer::create_replicated(mesh, BUF_SIZE, TILE_SIZE as u64, 0)
+            .expect("input buffer");
+        let output_buf = MeshBuffer::create_replicated(mesh, BUF_SIZE, TILE_SIZE as u64, 0)
+            .expect("output buffer");
+
+        let num_u16 = BUF_SIZE as usize / 2;
+        let mut input = vec![0u16; num_u16];
+        for i in 0..num_u16 {
+            input[i] = 0x3E00u16 | (i as u16 & 0xFF);
+        }
+        mesh.write_mesh_buffer(&input_buf, bytemuck::cast_slice(&input))
+            .expect("input write");
+
+        let kernel_def = build_empty_kernel(1, 1);
+        let mut server = crate::compute::server::TtServer::from_singleton();
+        let stream_id = cubecl_common::stream_id::StreamId::current();
+
+        let sources =
+            cubecl_cpp::tt_metal::compile::compile_to_tt_sources(&kernel_def, NUM_TILES, TILE_SIZE)
+                .expect("compile_to_tt_sources");
+
+        server
+            .launch_from_sources(
+                &sources,
+                &[input_buf.address()],
+                &[output_buf.address()],
+                &[2, TILE_SIZE],
+                &[2, TILE_SIZE],
+                stream_id,
+            )
+            .expect("launch");
+
+        let mut output_bytes = vec![0u8; BUF_SIZE as usize];
+        server
+            .mesh()
+            .read_mesh_buffer(&output_buf, &mut output_bytes)
+            .expect("output read");
+        let output: &[u16] = bytemuck::cast_slice(&output_bytes);
+        let mismatches = input
+            .iter()
+            .zip(output.iter())
+            .filter(|(a, b)| a != b)
+            .count();
+        assert_eq!(
+            mismatches, 0,
+            "CubeTask pipeline: {}/{} mismatches",
+            mismatches, num_u16
+        );
+    }
+
     #[test]
     fn cubetask_compile_pipeline() {
         with_tt_hardware_test(|| {
@@ -4233,63 +4343,41 @@ stderr:
                 return;
             }
             let mesh = test_mesh();
+            run_cubetask_compile_pipeline(mesh);
+        });
+    }
 
-            const TILE_SIZE: u32 = 32 * 32 * 2;
-            const NUM_TILES: u32 = 2;
-            const BUF_SIZE: u64 = NUM_TILES as u64 * TILE_SIZE as u64;
-
-            let input_buf = MeshBuffer::create_replicated(&mesh, BUF_SIZE, TILE_SIZE as u64, 0)
-                .expect("input buffer");
-            let output_buf = MeshBuffer::create_replicated(&mesh, BUF_SIZE, TILE_SIZE as u64, 0)
-                .expect("output buffer");
-
-            let num_u16 = BUF_SIZE as usize / 2;
-            let mut input = vec![0u16; num_u16];
-            for i in 0..num_u16 {
-                input[i] = 0x3E00u16 | (i as u16 & 0xFF);
+    // Manual characterization only: on the current raw Program/launch_from_sources path,
+    // MeshDevice::num_program_cache_entries() stayed at zero even with program cache enabled.
+    // Keep this available for explicit probing, but do not run it in the ordinary suite until
+    // TT-Metal's cache semantics for this low-level path are better understood.
+    #[test]
+    #[ignore = "manual TT program-cache characterization for raw Program path"]
+    fn tt_program_cache_populates_for_cubetask_pipeline() {
+        with_tt_hardware_test(|| {
+            if !hardware_tests_enabled() {
+                return;
             }
-            mesh.write_mesh_buffer(&input_buf, bytemuck::cast_slice(&input))
-                .expect("input write");
+            let mesh = test_mesh();
+            mesh.clear_program_cache().expect("clear program cache");
+            let before = mesh
+                .num_program_cache_entries()
+                .expect("program cache entries before run");
+            assert_eq!(before, 0, "cleared TT program cache should start empty");
 
-            // Build a KernelDefinition and wrap it in a CubeTask-compatible struct
-            let kernel_def = build_empty_kernel(1, 1);
-            let mut server = crate::compute::server::TtServer::from_singleton();
-            let stream_id = cubecl_common::stream_id::StreamId::current();
+            run_cubetask_compile_pipeline(mesh);
+            let after_first = mesh
+                .num_program_cache_entries()
+                .expect("program cache entries after first run");
 
-            // Compile through the CubeTask pipeline
-            let sources = cubecl_cpp::tt_metal::compile::compile_to_tt_sources(
-                &kernel_def,
-                NUM_TILES,
-                TILE_SIZE,
-            )
-            .expect("compile_to_tt_sources");
+            run_cubetask_compile_pipeline(mesh);
+            let after_second = mesh
+                .num_program_cache_entries()
+                .expect("program cache entries after second run");
 
-            server
-                .launch_from_sources(
-                    &sources,
-                    &[input_buf.address()],
-                    &[output_buf.address()],
-                    &[2, TILE_SIZE],
-                    &[2, TILE_SIZE],
-                    stream_id,
-                )
-                .expect("launch");
-
-            let mut output_bytes = vec![0u8; BUF_SIZE as usize];
-            server
-                .mesh()
-                .read_mesh_buffer(&output_buf, &mut output_bytes)
-                .expect("output read");
-            let output: &[u16] = bytemuck::cast_slice(&output_bytes);
-            let mismatches = input
-                .iter()
-                .zip(output.iter())
-                .filter(|(a, b)| a != b)
-                .count();
             assert_eq!(
-                mismatches, 0,
-                "CubeTask pipeline: {}/{} mismatches",
-                mismatches, num_u16
+                after_second, after_first,
+                "identical rerun should not increase MeshDevice program-cache entries unexpectedly"
             );
         });
     }
@@ -5536,7 +5624,7 @@ stderr:
             .set_runtime_args(
                 reader_id,
                 core,
-                &[lhs_buf.address(), rhs_buf.address(), NUM_TILES],
+                &[lhs_buf.address(), rhs_buf.address(), NUM_TILES, 0],
             )
             .expect("reader args");
         program
@@ -5835,7 +5923,7 @@ stderr:
             .expect("compute");
 
         program
-            .set_runtime_args(reader_id, core, &[input_buf.address(), NUM_TILES])
+            .set_runtime_args(reader_id, core, &[input_buf.address(), NUM_TILES, 0])
             .expect("reader args");
         program
             .set_runtime_args(writer_id, core, &[out_buf.address(), NUM_TILES])
@@ -5986,7 +6074,7 @@ stderr:
             .expect("compute");
 
         program
-            .set_runtime_args(reader_id, core, &[input_buf.address(), NUM_TILES])
+            .set_runtime_args(reader_id, core, &[input_buf.address(), NUM_TILES, 0])
             .expect("reader args");
         program
             .set_runtime_args(writer_id, core, &[output_buf.address(), NUM_TILES])
@@ -6121,7 +6209,7 @@ first expected: {:?}",
                 .expect("compute kernel should compile");
 
             program
-                .set_runtime_args(reader_id, core, &[input_buf.address(), NUM_TILES])
+                .set_runtime_args(reader_id, core, &[input_buf.address(), NUM_TILES, 0])
                 .expect("reader runtime args should set");
             program
                 .set_runtime_args(writer_id, core, &[output_buf.address(), NUM_TILES])
@@ -6246,7 +6334,7 @@ void kernel_main() {
                 .expect("writer");
 
             program
-                .set_runtime_args(reader_id, core, &[input_buf.address(), NUM_TILES])
+                .set_runtime_args(reader_id, core, &[input_buf.address(), NUM_TILES, 0])
                 .expect("reader args");
             program
                 .set_runtime_args(writer_id, core, &[output_buf.address(), NUM_TILES])
@@ -6368,11 +6456,7 @@ void kernel_main() {
                 .expect("compute");
 
             program
-                .set_runtime_args(
-                    reader_id,
-                    core,
-                    &[input_buf.address(), NUM_TILES, TILE_SIZE],
-                )
+                .set_runtime_args(reader_id, core, &[input_buf.address(), NUM_TILES, 0])
                 .expect("reader args");
             program
                 .set_runtime_args(
@@ -6510,11 +6594,7 @@ void kernel_main() {
                 .expect("compute");
 
             program
-                .set_runtime_args(
-                    reader_id,
-                    core,
-                    &[input_buf.address(), NUM_TILES, TILE_SIZE],
-                )
+                .set_runtime_args(reader_id, core, &[input_buf.address(), NUM_TILES, 0])
                 .expect("reader args");
             program
                 .set_runtime_args(
@@ -6650,7 +6730,7 @@ void kernel_main() {
                 .expect("compute");
 
             program
-                .set_runtime_args(reader_id, core, &[input_buf.address(), NUM_TILES])
+                .set_runtime_args(reader_id, core, &[input_buf.address(), NUM_TILES, 0])
                 .expect("reader args");
             program
                 .set_runtime_args(writer_id, core, &[output_buf.address(), NUM_TILES])
@@ -6818,7 +6898,7 @@ void kernel_main() {
                 .set_runtime_args(
                     reader_id,
                     core,
-                    &[input_a.address(), input_b.address(), NUM_TILES],
+                    &[input_a.address(), input_b.address(), NUM_TILES, 0],
                 )
                 .expect("reader args");
             program
@@ -7019,7 +7099,7 @@ void kernel_main() {
             .set_runtime_args(
                 reader_id,
                 core,
-                &[input_a.address(), input_b.address(), NUM_TILES],
+                &[input_a.address(), input_b.address(), NUM_TILES, 0],
             )
             .expect("reader args");
         program
@@ -7152,7 +7232,7 @@ first expected: {:?}",
             .expect("compute");
 
         program
-            .set_runtime_args(reader_id, core, &[input_buf.address(), NUM_TILES])
+            .set_runtime_args(reader_id, core, &[input_buf.address(), NUM_TILES, 0])
             .expect("reader args");
         program
             .set_runtime_args(writer_id, core, &[output_buf.address(), NUM_TILES])
@@ -7336,17 +7416,22 @@ first expected: {:?}",
 
     #[test]
     fn compile_kernel_rejects_missing_reader_compile_args() {
-        let mut ctx = make_test_context();
-        let err = ctx
-            .compile_kernel(
-                &TtKernelSources::copy_kernel(1, 2048),
-                &[0x10],
-                &[0x20],
-                std::sync::Arc::new(cubecl_runtime::logging::ServerLogger::default()),
-            )
-            .expect_err("missing reader compile args should fail before TT kernel build");
+        with_tt_hardware_test(|| {
+            let mut ctx = make_test_context();
+            let mesh = get_mesh();
+            let err = ctx
+                .compile_kernel(
+                    &mesh,
+                    &TtKernelSources::copy_kernel(1, 2048),
+                    &[0x10],
+                    &[0x20],
+                    std::sync::Arc::new(cubecl_runtime::logging::ServerLogger::default()),
+                    false,
+                )
+                .expect_err("missing reader compile args should fail before TT kernel build");
 
-        assert!(format!("{err:?}").contains("reader compile args missing"));
+            assert!(format!("{err:?}").contains("reader compile args missing"));
+        });
     }
 
     #[test]
@@ -7366,20 +7451,30 @@ first expected: {:?}",
             )
             .with_compile_args(vec![2, 2048], vec![2, 2048]);
 
-            let err = ctx
+            let mesh = get_mesh();
+            let compiled = ctx
                 .compile_kernel(
+                    &mesh,
                     &sources,
                     &[0x10],
                     &[0x20],
                     std::sync::Arc::new(cubecl_runtime::logging::ServerLogger::default()),
+                    false,
                 )
-                .expect_err("invalid TT compute source should surface as a Rust-side launch error");
+                .expect("compiling program structure should succeed");
 
-            assert!(matches!(
-                err,
-                cubecl_core::server::LaunchError::CompilationError(_)
-                    | cubecl_core::server::LaunchError::Unknown { .. }
-            ));
+            let mut workload = MeshWorkload::new();
+            workload.add_program_to_full_mesh(&mesh, compiled.program);
+
+            let err = mesh.enqueue_workload(&mut workload, true).expect_err(
+                "invalid TT compute source should surface as an enqueue/compilation error",
+            );
+
+            assert!(
+                format!("{err:?}").contains("Compile")
+                    || format!("{err:?}").contains("kernel")
+                    || format!("{err:?}").contains("fail")
+            );
         });
     }
 
@@ -7493,7 +7588,7 @@ first expected: {:?}",
         assert!(
             sources
                 .writer_source
-                .contains("uint32_t unit_idx = tile_idx * tile_units + i;")
+                .contains("uint32_t unit_idx = global_tile_idx * tile_units + i;")
         );
         assert!(sources.writer_source.contains("runtime_info_bytes"));
         assert!(
@@ -7558,7 +7653,7 @@ first expected: {:?}",
         assert!(
             sources
                 .writer_source
-                .contains("uint32_t unit_idx = tile_idx * tile_units + i;")
+                .contains("uint32_t unit_idx = global_tile_idx * tile_units + i;")
         );
     }
 
