@@ -40,7 +40,6 @@ pub(crate) struct TtKernelAnalysis {
     pub num_tiles: u32,
     pub tile_size_bytes: u32,
     pub data_format_tt: u8,
-    pub unit_item: Item<TtMetalDialect>,
     pub unit_item_size_bytes: u32,
     pub buffer_item_sizes: Vec<u32>,
     pub info_static_len: usize,
@@ -83,7 +82,7 @@ pub fn sources_from_repr(
     repr: &ComputeKernel<TtMetalDialect>,
     num_tiles: u32,
 ) -> Result<TtKernelSources, CompilationError> {
-    let analysis = analyze_kernel(repr, num_tiles, None)?;
+    let analysis = analyze_kernel(repr, num_tiles, None, None)?;
 
     let mut sources = match analysis.kind {
         SupportedComputeKind::Copy => {
@@ -223,7 +222,28 @@ pub fn runtime_sources_from_repr_with_page_size_and_staging(
     generic_tile_size_override: u32,
     full_input_staging: bool,
 ) -> Result<TtKernelSources, CompilationError> {
-    let analysis = analyze_kernel(repr, num_tiles, Some(generic_tile_size_override))?;
+    runtime_sources_from_repr_with_page_size_and_staging_and_unit_size(
+        repr,
+        num_tiles,
+        generic_tile_size_override,
+        full_input_staging,
+        None,
+    )
+}
+
+pub fn runtime_sources_from_repr_with_page_size_and_staging_and_unit_size(
+    repr: &ComputeKernel<TtMetalDialect>,
+    num_tiles: u32,
+    generic_tile_size_override: u32,
+    full_input_staging: bool,
+    dispatch_unit_size_override: Option<u32>,
+) -> Result<TtKernelSources, CompilationError> {
+    let analysis = analyze_kernel(
+        repr,
+        num_tiles,
+        Some(generic_tile_size_override),
+        dispatch_unit_size_override,
+    )?;
 
     let mut sources = match analysis.kind {
         SupportedComputeKind::Copy => {
@@ -338,6 +358,7 @@ fn analyze_kernel(
     repr: &ComputeKernel<TtMetalDialect>,
     requested_num_tiles: u32,
     generic_tile_size_override: Option<u32>,
+    dispatch_unit_size_override: Option<u32>,
 ) -> Result<TtKernelAnalysis, CompilationError> {
     if !repr.tensor_maps.is_empty() {
         return Err(unsupported_reason(
@@ -414,6 +435,9 @@ fn analyze_kernel(
     }
 
     let unit_item = select_unit_item(repr)?;
+    let unit_item_size_bytes = dispatch_unit_size_override
+        .unwrap_or(unit_item.size() as u32)
+        .max(normalize_buffer_elem(unit_item.elem.unpacked()).size() as u32);
     let (data_format_tt, mut tile_size_bytes) =
         infer_data_format_and_tile_size(normalize_buffer_elem(unit_item.elem.unpacked()))?;
     let buffer_item_sizes = repr
@@ -477,7 +501,7 @@ fn analyze_kernel(
     };
     if matches!(kind, SupportedComputeKind::Generic) {
         if let Some(override_bytes) = generic_tile_size_override {
-            tile_size_bytes = override_bytes.clamp(unit_item.size() as u32, tile_size_bytes.max(1));
+            tile_size_bytes = override_bytes.max(unit_item_size_bytes);
         }
     }
 
@@ -497,7 +521,7 @@ fn analyze_kernel(
         | SupportedComputeKind::Exp
         | SupportedComputeKind::Log => requested_num_tiles.max(1),
         SupportedComputeKind::Generic => {
-            let tile_units = (tile_size_bytes as usize / unit_item.size()).max(1) as u32;
+            let tile_units = (tile_size_bytes / unit_item_size_bytes.max(1)).max(1);
             repr.cube_dim.num_elems().div_ceil(tile_units).max(1)
         }
     };
@@ -511,8 +535,7 @@ fn analyze_kernel(
         num_tiles,
         tile_size_bytes,
         data_format_tt,
-        unit_item,
-        unit_item_size_bytes: unit_item.size() as u32,
+        unit_item_size_bytes,
         buffer_item_sizes,
         info_static_len: repr.body.info_static_len,
     })

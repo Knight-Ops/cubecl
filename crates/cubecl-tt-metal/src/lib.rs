@@ -35,7 +35,7 @@ mod tests {
         DataMovementKernelConfig, DataMovementProcessor, KernelBuildOptLevel, LogicalCore,
         MathFidelity, MeshBuffer, MeshDevice, MeshWorkload, Program,
     };
-    use std::env;
+    use std::{env, time::Instant};
 
     #[allow(dead_code)]
     pub type TestRuntime = crate::runtime::TtRuntime;
@@ -49,7 +49,7 @@ mod tests {
         fn _exit(status: i32) -> !;
     }
 
-    fn with_tt_hardware_test(test: impl FnOnce()) {
+    fn run_tt_hardware_test(test: impl FnOnce(), ignored: bool) {
         if !hardware_tests_enabled() {
             return;
         }
@@ -75,17 +75,22 @@ mod tests {
             .name()
             .expect("TT hardware test should have a thread name")
             .to_owned();
-        let output = std::process::Command::new(
+        let mut command = std::process::Command::new(
             std::env::current_exe().expect("test binary path should resolve"),
-        )
-        .env(TT_HARDWARE_SUBPROCESS_ENV, &test_name)
-        .env("TT_METAL_RUN_HARDWARE_TESTS", "1")
-        .arg("--exact")
-        .arg(&test_name)
-        .arg("--nocapture")
-        .arg("--test-threads=1")
-        .output()
-        .expect("TT hardware subprocess should spawn");
+        );
+        command
+            .env(TT_HARDWARE_SUBPROCESS_ENV, &test_name)
+            .env("TT_METAL_RUN_HARDWARE_TESTS", "1")
+            .arg("--exact")
+            .arg(&test_name)
+            .arg("--nocapture")
+            .arg("--test-threads=1");
+        if ignored {
+            command.arg("--ignored");
+        }
+        let output = command
+            .output()
+            .expect("TT hardware subprocess should spawn");
 
         if !output.status.success() {
             panic!(
@@ -100,37 +105,50 @@ stderr:
         }
     }
 
+    fn with_tt_hardware_test(test: impl FnOnce()) {
+        run_tt_hardware_test(test, false);
+    }
+
+    fn with_tt_hardware_test_ignored(test: impl FnOnce()) {
+        run_tt_hardware_test(test, true);
+    }
+
     fn with_tt_hardware_test_client(test: impl FnOnce(ComputeClient<TestRuntime>)) {
         with_tt_hardware_test(|| test(TestRuntime::client(&Default::default())));
     }
 
-    fn seeded_tt_tensor_identity<R: Runtime, C: Numeric + CubeElement>(
-        client: &ComputeClient<R>,
-        dim: usize,
-    ) -> cubecl_std::tensor::TensorHandle<R> {
-        let mut expected = vec![C::from_int(0); dim * dim];
-        for i in 0..dim {
-            expected[i * dim + i] = C::from_int(1);
+    #[cube(launch, address_type = "dynamic")]
+    fn tt_kernel_absolute_pos_tuple_2d(
+        absolute_pos_x_out: &mut Array<u32>,
+        absolute_pos_y_out: &mut Array<u32>,
+    ) {
+        if ABSOLUTE_POS >= absolute_pos_x_out.len() {
+            terminate!();
         }
 
-        let layout = client.create_tensor_from_slice(
-            C::as_bytes(&expected),
-            [dim, dim].into(),
-            core::mem::size_of::<C>(),
-        );
-        cubecl_std::tensor::TensorHandle::new(
-            layout.memory,
-            [dim, dim].to_vec(),
-            layout.strides,
-            C::as_type_native_unchecked(),
-        )
+        absolute_pos_x_out[ABSOLUTE_POS] = ABSOLUTE_POS_X as u32;
+        absolute_pos_y_out[ABSOLUTE_POS] = ABSOLUTE_POS_Y as u32;
     }
 
-    fn test_tt_tensor_identity<R: Runtime, C: Numeric + CubeElement + core::fmt::Display>(
-        client: ComputeClient<R>,
+    fn assert_tt_tensor_identity_output<
+        R: Runtime,
+        C: Numeric + CubeElement + core::fmt::Display,
+    >(
+        client: &ComputeClient<R>,
         dim: usize,
     ) {
-        let output = seeded_tt_tensor_identity::<R, C>(&client, dim);
+        let output = cubecl_std::tensor::TensorHandle::empty(
+            client,
+            [dim, dim].to_vec(),
+            C::as_type_native_unchecked(),
+        );
+        let vectorization = cubecl::tensor_vector_size_parallel(
+            client.io_optimized_vector_sizes(core::mem::size_of::<C>()),
+            output.shape(),
+            output.strides(),
+            1,
+        );
+        cubecl_std::tensor::identity::launch(client, &output);
 
         let actual = client.read_one_unchecked_tensor(output.clone().into_copy_descriptor());
         let actual = C::from_bytes(&actual);
@@ -151,11 +169,89 @@ stderr:
             .zip(actual.iter())
             .position(|(expected, actual)| expected != actual)
         {
+            let row = mismatch / dim;
+            let col = mismatch % dim;
             panic!(
-                "identity matrices are not equal: first mismatch at index {} (expected {}, got {})",
-                mismatch, expected[mismatch], actual[mismatch]
+                "identity matrices are not equal for dim={} vectorization={}: first mismatch at ({}, {}) index {} (expected {}, got {})",
+                dim, vectorization, row, col, mismatch, expected[mismatch], actual[mismatch]
             );
         }
+    }
+
+    fn test_tt_tensor_identity_tail<R: Runtime, C: Numeric + CubeElement + core::fmt::Display>(
+        client: &ComputeClient<R>,
+    ) {
+        let max_vectorization = client
+            .io_optimized_vector_sizes(core::mem::size_of::<C>())
+            .next()
+            .unwrap_or(1) as usize;
+        let dim = max_vectorization * 17;
+        let output = cubecl_std::tensor::TensorHandle::empty(
+            client,
+            [dim, dim].to_vec(),
+            C::as_type_native_unchecked(),
+        );
+        let vectorization = cubecl::tensor_vector_size_parallel(
+            client.io_optimized_vector_sizes(core::mem::size_of::<C>()),
+            output.shape(),
+            output.strides(),
+            1,
+        );
+        assert!(
+            vectorization > 1,
+            "TT tensor identity tail regression expects vectorized tensor I/O, got vector size {}",
+            vectorization
+        );
+
+        let vectors_x = dim / vectorization as usize;
+        assert_ne!(
+            vectors_x % 16,
+            0,
+            "TT tensor identity tail regression expects an incomplete 2D X workgroup, got dim {} and vector size {}",
+            dim,
+            vectorization
+        );
+
+        assert_tt_tensor_identity_output::<R, C>(client, dim);
+    }
+
+    fn test_tt_absolute_pos_tuple_case<R: Runtime>(
+        client: ComputeClient<R>,
+        addr_type: AddressType,
+        cube_count: (u32, u32),
+        cube_dim: (u32, u32),
+        length: u32,
+    ) {
+        if !client.properties().supports_address(addr_type) {
+            return;
+        }
+
+        let byte_len = length as usize * core::mem::size_of::<u32>();
+        let absolute_x_handle = client.empty(byte_len);
+        let absolute_y_handle = client.empty(byte_len);
+
+        unsafe {
+            tt_kernel_absolute_pos_tuple_2d::launch(
+                &client,
+                CubeCount::new_2d(cube_count.0, cube_count.1),
+                CubeDim::new_2d(cube_dim.0, cube_dim.1),
+                addr_type,
+                ArrayArg::from_raw_parts(absolute_x_handle.clone(), length as usize),
+                ArrayArg::from_raw_parts(absolute_y_handle.clone(), length as usize),
+            )
+        };
+
+        let actual_x = client.read_one_unchecked(absolute_x_handle);
+        let actual_y = client.read_one_unchecked(absolute_y_handle);
+        let actual_x = u32::from_bytes(&actual_x);
+        let actual_y = u32::from_bytes(&actual_y);
+
+        let width = cube_count.0 * cube_dim.0;
+        let expected_x: Vec<u32> = (0..length).map(|index| index % width).collect();
+        let expected_y: Vec<u32> = (0..length).map(|index| index / width).collect();
+
+        assert_eq!(actual_x, &expected_x);
+        assert_eq!(actual_y, &expected_y);
     }
 
     // Shared TT test-surface matrix. Keep this summary aligned with `PHASES.md`
@@ -163,46 +259,30 @@ stderr:
     //
     // `cubecl_std`
     // - enabled: `event`, `quantized_view` (current per-tensor int/fp4 TT-local wrappers),
-    //   `reinterpret_slice`, TT-local seeded `tensor_identity`, `trigonometry`
-    // - broader parity still queued: upstream `tensor_identity` 2D/modulo parity and wider
-    //   `quantized_view` layout/output-type coverage beyond the current TT-local wrappers
+    //   `reinterpret_slice`, upstream `tensor_identity` (proven `f32`/`u32` set),
+    //   `trigonometry`
+    // - broader parity still queued: wider `quantized_view` layout/output-type coverage
+    //   beyond the current TT-local wrappers
     //
     // `cubecl_core::runtime_tests`
-    // - enabled: `assign`, `binary_untyped` (`mulhi`), `branch`,
-    //   `comparison`, `const_match`, `constants`, `debug` (helper-call subset),
-    //   `different_rank`, `enums`, `file`, `index` (`test_assign_index` only), `launch`,
-    //   `launch_untyped` (dynamic addressing only), `metadata`, `minifloat`
-    //   (feature-gated conversion subset; TT-native `Bfp8_b`/`Bfp4_b` direct copy and storage suites plus direct `Bfp8_b`/`Bfp4_b` native `add`/`sub`/`mul`/`div` and `abs`/`sqrt`/`rsqrt`/`sin`/`cos`/`tan`/`tanh`/`exp`/`log` suites
-    //   are now green on hardware, while broader wrapper promotion, downstream integration, and `Bfp2_b` still need more bridge work),
-    //   `numeric`, `properties`, `saturating`
-    //   (`i32`/`u32` subset), `sequence`, `slice`, `tensor`
-    //   (current `test_tensor_coordinate` coverage is green through the narrow 2D single-cube-count launch model),
-    //   TT-local `topology` (full upstream absolute-position coverage, linearized and 3D cube-count `CUBE_POS_X` / `CUBE_POS_Y` / `CUBE_POS_Z` decomposition, plus 2D single-cube `UNIT_POS_X` / `UNIT_POS_Y` subsets,
-    //   including tail handling), `to_client` (opportunistic when more than one device is visible),
-    //   `unary_int` (integer abs/bit-operation subset), `unroll`
-    // - enabled in TT-local single-unit wrappers: `atomic` (the full current upstream generated suite is green through single-unit `Atomic<u32>` load/store/add,
-    //   scalar `Atomic<i32>` min/max, and scalar/vectorized-2/vectorized-4 `Atomic<f32>` add/min/max through the generic writeback path)
-    // - partially enabled: `barrier` (the full current upstream runtime suite is green through the TT generic-writer shared-scratch subset), `binary` (scalar plus vectorized-2/vectorized-4/vectorized-8/vectorized-16 logical-BF16 and logical-F32
-    //   `add`/`sub`/`mul`/`div` through the TT-native tiled path), `plane` (the full current upstream plane suite is green on hardware through the TT generic upstream warp-lowering path for `vec1`/`vec2`/`vec4` `sum`/`prod`, inclusive/exclusive `sum`/`prod`, `max`/`min`, `broadcast`, `shuffle`/`shuffle_xor`/`shuffle_up`/`shuffle_down`, `elect`, plus `vec1` `all`/`any`/`ballot`; the TT-local `vec1` `elect` regression is retained as an extra focused check while true collective semantics still need more work), `synchronization` (TT-local
-    //   `sync_cube`, `finished_sync_cube`, `sync_cube_shared`, and the current `sync_plane`
-    //   visibility subset are green on hardware; broader plane/subgroup synchronization semantics
-    //   are still unmodeled), `unary` (scalar plus vectorized-2/vectorized-4/vectorized-8/vectorized-16
-    //   logical-BF16 and logical-F32 `abs`, `sqrt`, `inverse_sqrt`, `sin`, `cos`, `tan`, `tanh`,
-    //   `exp`, and `log` through the TT-native tiled path), `vector` (index, index-assign, loop-unroll,
-    //   conditional, comparison, and the single-unit scratch/shared-layout `test_shared_memory` slice), `stream` (the reduced and medium cross-stream TT-local wrappers are now green on hardware after fixing cross-stream resource ownership; the full upstream-sized stream workload still stalls and remains blocked)
-    // - queued after the current baseline: broader `binary`, broader `unary`, and wider
-    //   `topology` / `tensor` parity beyond the current TT-local 2D and multi-cube-count decomposition subset
-    //   the BF16/F32 native wrapper path is now green through vec16, while TT-native block-float
-    //   TT-local logical-`f32` wrapper suites are now green on hardware for the proven
-    //   `Bfp8_b`/`Bfp4_b` native `add`/`sub`/`mul`/`div` and
-    //   `abs`/`sqrt`/`rsqrt`/`sin`/`cos`/`tan`/`tanh`/`exp`/`log` surface, but true
-    //   upstream wrapper promotion still needs more end-to-end validation because
-    //   CubeCL `e4m3`/`e2m1x2` element semantics are not the same thing as TT block-float storage
-    // - control-flow/shared-memory bring-up after the current baseline: broader shared-memory
-    //   vector semantics and synchronization semantics beyond the current proven shared-scratch barrier subset
-    // - parity lane / capability-blocked: `all_reduce` (single-device identity semantics are now implemented and hardware-validated for both in-place and out-of-place TT runtime calls, and the upstream wrapper stays hardware-clean in the current 1-device environment, but true collective parity is still unverified until 2+ TT devices are available), `cluster`,
-    //   `cmma`, `stream` (reduced and medium cross-stream slices are green on hardware after the owner-stream fix, but the full upstream-sized workload is still too expensive on the current TT generic path to claim parity), `tensormap`, and the remaining
-    //   plane/subgroup-dependent `synchronization` surface beyond the current cube-level subset plus multi-device collective parity
+    // - live TT lane: `all_reduce` (single-device identity semantics), `assign`,
+    //   `atomic` (current single-unit generated suite), `barrier` (current
+    //   shared-scratch subset), `binary`, `binary_untyped`, `branch`,
+    //   `comparison`, `const_match`, `constants`, `debug`, `different_rank`,
+    //   `enums`, `file`, `index`, `launch`, `launch_untyped`, `metadata`,
+    //   `minifloat`, `numeric`, `plane`, `properties`, `saturating`,
+    //   `sequence`, `slice`, `stream` (reduced, medium, and upstream-sized broad
+    //   wrappers),
+    //   `synchronization` (current subset), `tensor` (current
+    //   `test_tensor_coordinate` subset), TT-local `topology`, `to_client`,
+    //   `unary`, `unary_int`, `unroll`, and the current `vector` subset
+    // - manual-only green characterization: broad stream one-round/full-chain
+    //   probes, diagnostic probe, and TT program-cache characterization
+    // - still queued after the current baseline: wider
+    //   topology/tensor/shared-memory/synchronization semantics, vector widths
+    //   beyond vec16, true upstream wrapper promotion for TT block-float
+    //   formats, `Bfp2_b`, multi-device collectives, and capability-lane
+    //   categories such as `tensormap`, `cluster`, and `cmma`
     // - helper-only inventory entry: `traits`
     mod cubecl_std_wrappers {
         use super::*;
@@ -255,11 +335,36 @@ stderr:
 
         #[test]
         fn tensor_identity_suite() {
-            with_tt_hardware_test_client(|client| {
+            with_tt_hardware_test(|| {
                 for dim in [4usize, 16, 256, 1024] {
-                    test_tt_tensor_identity::<TestRuntime, f32>(client.clone(), dim);
-                    test_tt_tensor_identity::<TestRuntime, u32>(client.clone(), dim);
+                    cubecl_std::tests::tensor::identity::test_identity::<TestRuntime, f32>(
+                        &Default::default(),
+                        dim,
+                    );
+                    cubecl_std::tests::tensor::identity::test_identity::<TestRuntime, u32>(
+                        &Default::default(),
+                        dim,
+                    );
                 }
+                let client = TestRuntime::client(&Default::default());
+                test_tt_tensor_identity_tail::<TestRuntime, f32>(&client);
+                test_tt_tensor_identity_tail::<TestRuntime, u32>(&client);
+            });
+        }
+
+        #[test]
+        fn tensor_identity_dim_16_f32() {
+            with_tt_hardware_test(|| {
+                let client = TestRuntime::client(&Default::default());
+                assert_tt_tensor_identity_output::<TestRuntime, f32>(&client, 16);
+            });
+        }
+
+        #[test]
+        fn tensor_identity_dim_256_f32() {
+            with_tt_hardware_test(|| {
+                let client = TestRuntime::client(&Default::default());
+                assert_tt_tensor_identity_output::<TestRuntime, f32>(&client, 256);
             });
         }
 
@@ -443,6 +548,36 @@ stderr:
                         TestRuntime,
                     >(client, AddressType::U64);
                 });
+                with_tt_hardware_test_client(|client| {
+                    test_tt_absolute_pos_tuple_case::<TestRuntime>(
+                        client.clone(),
+                        AddressType::U32,
+                        (1, 1),
+                        (12, 3),
+                        12 * 3,
+                    );
+                    test_tt_absolute_pos_tuple_case::<TestRuntime>(
+                        client.clone(),
+                        AddressType::U64,
+                        (1, 1),
+                        (12, 3),
+                        12 * 3,
+                    );
+                    test_tt_absolute_pos_tuple_case::<TestRuntime>(
+                        client.clone(),
+                        AddressType::U32,
+                        (3, 2),
+                        (4, 3),
+                        3 * 2 * 4 * 3,
+                    );
+                    test_tt_absolute_pos_tuple_case::<TestRuntime>(
+                        client,
+                        AddressType::U64,
+                        (3, 2),
+                        (4, 3),
+                        3 * 2 * 4 * 3,
+                    );
+                });
             }
 
             #[test]
@@ -454,6 +589,20 @@ stderr:
                     cubecl_core::runtime_tests::topology::test_kernel_topology_axis_components_2d_single_cube_tail::<
                         TestRuntime,
                     >(client.clone(), AddressType::U64);
+                    test_tt_absolute_pos_tuple_case::<TestRuntime>(
+                        client.clone(),
+                        AddressType::U32,
+                        (3, 2),
+                        (4, 3),
+                        3 * 2 * 4 * 3 - 5,
+                    );
+                    test_tt_absolute_pos_tuple_case::<TestRuntime>(
+                        client,
+                        AddressType::U64,
+                        (3, 2),
+                        (4, 3),
+                        3 * 2 * 4 * 3 - 5,
+                    );
                 });
             }
 
@@ -1232,8 +1381,146 @@ stderr:
             }
         }
 
+        #[cube(launch)]
+        fn tt_stream_input_page_probe_kernel(input: &Array<u32>, output: &mut Array<u32>) {
+            if ABSOLUTE_POS >= output.len() {
+                terminate!()
+            }
+
+            let idx = ABSOLUTE_POS * 512usize;
+            if idx < input.len() {
+                output[ABSOLUTE_POS] = input[idx];
+            } else {
+                output[ABSOLUTE_POS] = 0;
+            }
+        }
+
+        #[cube(launch)]
+        fn tt_stream_input_metadata_probe_kernel(input: &Array<u32>, output: &mut Array<u32>) {
+            if ABSOLUTE_POS > 0 || output.len() < 8 {
+                terminate!()
+            }
+
+            output[0] = input.len() as u32;
+            output[1] = input[0];
+            output[2] = input[512];
+            output[3] = input[1024];
+            output[4] = input[1536];
+            output[5] = input[2048];
+            output[6] = input[2560];
+            output[7] = input[3584];
+        }
+
+        #[cube(launch)]
+        fn tt_stream_input_index_probe_kernel(
+            input: &Array<u32>,
+            idx_out: &mut Array<u32>,
+            in_bounds_out: &mut Array<u32>,
+            value_out: &mut Array<u32>,
+        ) {
+            if ABSOLUTE_POS >= idx_out.len() {
+                terminate!()
+            }
+
+            let idx = ABSOLUTE_POS * 512usize;
+            idx_out[ABSOLUTE_POS] = idx as u32;
+            if idx < input.len() {
+                in_bounds_out[ABSOLUTE_POS] = 1;
+                value_out[ABSOLUTE_POS] = input[idx];
+            } else {
+                in_bounds_out[ABSOLUTE_POS] = 0;
+                value_out[ABSOLUTE_POS] = u32::MAX;
+            }
+        }
+
+        #[cube(launch)]
+        fn tt_stream_absolute_pos_probe_kernel(input: &Array<u32>, output: &mut Array<u32>) {
+            if UNIT_POS as usize >= output.len() {
+                terminate!()
+            }
+
+            if input.len() > 0 {
+                output[UNIT_POS as usize] = ABSOLUTE_POS as u32;
+            }
+        }
+
         mod stream {
             use super::*;
+
+            fn run_stream_profile_case(len: usize, rounds: usize, num_loop: usize) {
+                crate::compute::profile::reset_launch_profile();
+                let started = Instant::now();
+                let client = TestRuntime::client(&Default::default());
+                cubecl_core::runtime_tests::stream::test_stream_chained::<TestRuntime, f32>(
+                    client, len, rounds, num_loop,
+                );
+                eprintln!(
+                    "TT stream profile len={len} rounds={rounds} num_loop={num_loop} elapsed={:?} profile={:#?}",
+                    started.elapsed(),
+                    crate::compute::profile::snapshot_launch_profile(),
+                );
+            }
+
+            fn run_stream_profile_diagnostic_case(len: usize, rounds: usize, num_loop: usize) {
+                assert!(len > 0);
+                assert!(num_loop > 0);
+                assert_eq!(
+                    len % 32,
+                    0,
+                    "len must be divisible by 32 for the TT wrapper"
+                );
+
+                crate::compute::profile::reset_launch_profile();
+                let started = Instant::now();
+                let client = TestRuntime::client(&Default::default());
+                let client_1 = unsafe {
+                    let mut c = client.clone();
+                    c.set_stream(cubecl_common::stream_id::StreamId { value: 10000 });
+                    c
+                };
+                let client_2 = unsafe {
+                    let mut c = client.clone();
+                    c.set_stream(cubecl_common::stream_id::StreamId { value: 10001 });
+                    c
+                };
+
+                let input_seed: Vec<u32> = (0..len as u32).collect();
+                let mut input = client_1.create_from_slice(u32::as_bytes(&input_seed));
+                let mut output = None;
+                let mut state = input_seed;
+                let mut expected_first = 0.0f32;
+
+                for _ in 0..rounds {
+                    let zero_output = vec![f32::new(0.0); len];
+                    let output_ = client_1.create_from_slice(f32::as_bytes(&zero_output));
+                    unsafe {
+                        cubecl_core::runtime_tests::stream::big_task::launch::<f32, TestRuntime>(
+                            &client_1,
+                            CubeCount::Static(len as u32 / 32, 1, 1),
+                            CubeDim::new_1d(32),
+                            ArrayArg::from_raw_parts(input, len),
+                            ArrayArg::from_raw_parts(output_.clone(), len),
+                            num_loop,
+                        )
+                    };
+                    input = output_.clone();
+                    output = Some(output_);
+
+                    let total: f32 = (0..num_loop).map(|i| state[i % state.len()] as f32).sum();
+                    expected_first = total / num_loop as f32;
+                    state = vec![expected_first.to_bits(); len];
+                }
+
+                let actual = client_2.read_one_unchecked(output.expect("stream diagnostic output"));
+                let actual = f32::from_bytes(&actual);
+                eprintln!(
+                    "TT stream diagnostic len={len} rounds={rounds} num_loop={num_loop} elapsed={:?} expected_first={} actual_first={} profile={:#?}",
+                    started.elapsed(),
+                    expected_first,
+                    actual[0],
+                    crate::compute::profile::snapshot_launch_profile(),
+                );
+            }
 
             #[test]
             fn test_stream_small() {
@@ -1250,12 +1537,147 @@ stderr:
             }
 
             #[test]
+            fn test_stream_broad() {
+                with_tt_hardware_test_client(|client| {
+                    cubecl_core::runtime_tests::stream::test_stream::<TestRuntime, f32>(client);
+                });
+            }
+
+            #[test]
             #[ignore = "Manual throughput characterization for the broad TT stream shape"]
             fn test_stream_broad_single_round_manual() {
-                with_tt_hardware_test_client(|client| {
-                    cubecl_core::runtime_tests::stream::test_stream_chained::<TestRuntime, f32>(
-                        client, 4096, 1, 4096,
+                with_tt_hardware_test_ignored(|| {
+                    run_stream_profile_case(4096, 1, 4096);
+                });
+            }
+
+            #[test]
+            #[ignore = "Manual throughput characterization for the full broad TT stream chain"]
+            fn test_stream_broad_full_chain_manual() {
+                with_tt_hardware_test_ignored(|| {
+                    run_stream_profile_case(4096, 300, 4096);
+                });
+            }
+
+            #[test]
+            #[ignore = "Manual diagnostic for the broad TT stream shape without assertion"]
+            fn test_stream_broad_single_round_diagnostic_manual() {
+                with_tt_hardware_test_ignored(|| {
+                    run_stream_profile_diagnostic_case(4096, 1, 4096);
+                });
+            }
+
+            #[test]
+            fn test_stream_broad_input_page_probe() {
+                with_tt_hardware_test(|| {
+                    let client = TestRuntime::client(&Default::default());
+                    let input: Vec<u32> = (0..4096u32).collect();
+                    let output = client.create_from_slice(u32::as_bytes(&vec![0u32; 8]));
+                    let input = client.create_from_slice(u32::as_bytes(&input));
+
+                    unsafe {
+                        tt_stream_input_page_probe_kernel::launch::<TestRuntime>(
+                            &client,
+                            CubeCount::Static(1, 1, 1),
+                            CubeDim::new_1d(32),
+                            ArrayArg::from_raw_parts(input, 4096),
+                            ArrayArg::from_raw_parts(output.clone(), 8),
+                        )
+                    };
+
+                    let actual = client.read_one_unchecked(output);
+                    let actual = u32::from_bytes(&actual);
+                    let expected = [0u32, 512, 1024, 1536, 2048, 2560, 3072, 3584];
+                    assert_eq!(
+                        &actual[..8],
+                        &expected,
+                        "staged TT stream input pages should remain contiguous across the full staged payload"
                     );
+                });
+            }
+
+            #[test]
+            #[ignore = "Manual diagnostic for staged-input metadata versus payload residency"]
+            fn test_stream_broad_input_metadata_probe_manual() {
+                with_tt_hardware_test_ignored(|| {
+                    let client = TestRuntime::client(&Default::default());
+                    let input: Vec<u32> = (0..4096u32).collect();
+                    let output = client.create_from_slice(u32::as_bytes(&vec![0u32; 8]));
+                    let input = client.create_from_slice(u32::as_bytes(&input));
+
+                    unsafe {
+                        tt_stream_input_metadata_probe_kernel::launch::<TestRuntime>(
+                            &client,
+                            CubeCount::Static(1, 1, 1),
+                            CubeDim::new_1d(32),
+                            ArrayArg::from_raw_parts(input, 4096),
+                            ArrayArg::from_raw_parts(output.clone(), 8),
+                        )
+                    };
+
+                    let actual = client.read_one_unchecked(output);
+                    let actual = u32::from_bytes(&actual);
+                    panic!("TT stream staged metadata probe: {actual:?}");
+                });
+            }
+
+            #[test]
+            #[ignore = "Manual diagnostic for staged-input dynamic indexing"]
+            fn test_stream_broad_input_index_probe_manual() {
+                with_tt_hardware_test_ignored(|| {
+                    let client = TestRuntime::client(&Default::default());
+                    let input: Vec<u32> = (0..4096u32).collect();
+                    let idx_out = client.create_from_slice(u32::as_bytes(&vec![0u32; 8]));
+                    let in_bounds_out = client.create_from_slice(u32::as_bytes(&vec![0u32; 8]));
+                    let value_out = client.create_from_slice(u32::as_bytes(&vec![0u32; 8]));
+                    let input = client.create_from_slice(u32::as_bytes(&input));
+
+                    unsafe {
+                        tt_stream_input_index_probe_kernel::launch::<TestRuntime>(
+                            &client,
+                            CubeCount::Static(1, 1, 1),
+                            CubeDim::new_1d(32),
+                            ArrayArg::from_raw_parts(input, 4096),
+                            ArrayArg::from_raw_parts(idx_out.clone(), 8),
+                            ArrayArg::from_raw_parts(in_bounds_out.clone(), 8),
+                            ArrayArg::from_raw_parts(value_out.clone(), 8),
+                        )
+                    };
+
+                    let idx_bytes = client.read_one_unchecked(idx_out);
+                    let in_bounds_bytes = client.read_one_unchecked(in_bounds_out);
+                    let value_bytes = client.read_one_unchecked(value_out);
+                    let idxs = u32::from_bytes(&idx_bytes);
+                    let in_bounds = u32::from_bytes(&in_bounds_bytes);
+                    let values = u32::from_bytes(&value_bytes);
+                    panic!(
+                        "TT stream staged index probe: idxs={idxs:?} in_bounds={in_bounds:?} values={values:?}"
+                    );
+                });
+            }
+
+            #[test]
+            #[ignore = "Manual diagnostic for staged-input absolute positions"]
+            fn test_stream_broad_absolute_pos_probe_manual() {
+                with_tt_hardware_test_ignored(|| {
+                    let client = TestRuntime::client(&Default::default());
+                    let input: Vec<u32> = (0..4096u32).collect();
+                    let output = client.create_from_slice(u32::as_bytes(&vec![0u32; 8]));
+                    let input = client.create_from_slice(u32::as_bytes(&input));
+
+                    unsafe {
+                        tt_stream_absolute_pos_probe_kernel::launch::<TestRuntime>(
+                            &client,
+                            CubeCount::Static(1, 1, 1),
+                            CubeDim::new_1d(32),
+                            ArrayArg::from_raw_parts(input, 4096),
+                            ArrayArg::from_raw_parts(output.clone(), 8),
+                        )
+                    };
+
+                    let actual = client.read_one_unchecked(output);
+                    let actual = u32::from_bytes(&actual);
+                    panic!("TT stream staged absolute-pos probe: {actual:?}");
                 });
             }
         }
@@ -4224,7 +4646,7 @@ stderr:
 
     #[test]
     fn buffer_write_read_round_trip() {
-        with_tt_hardware_test(|| {
+        with_tt_hardware_test_ignored(|| {
             if !hardware_tests_enabled() {
                 return;
             }
@@ -4364,7 +4786,7 @@ stderr:
     #[test]
     #[ignore = "manual TT program-cache characterization for raw Program path"]
     fn tt_program_cache_populates_for_cubetask_pipeline() {
-        with_tt_hardware_test(|| {
+        with_tt_hardware_test_ignored(|| {
             if !hardware_tests_enabled() {
                 return;
             }
@@ -7357,6 +7779,162 @@ first expected: {:?}",
         );
         assert_eq!(prepared.sources.writer_compile_args, vec![20, 4096]);
         assert_eq!(prepared.bindings[1].allocation_size_bytes, 2048);
+    }
+
+    #[test]
+    fn tt_dialect_unit_pos_computation_is_intra_cube() {
+        use cubecl_cpp::shared::DialectCubeBuiltins;
+        use cubecl_cpp::tt_metal::TtMetalDialect;
+        use std::fmt;
+
+        struct UnitPosComputation;
+
+        impl fmt::Display for UnitPosComputation {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                <TtMetalDialect<crate::TtWmmaCompiler> as DialectCubeBuiltins<
+                    TtMetalDialect<crate::TtWmmaCompiler>,
+                >>::compile_unit_pos_computation(f)
+            }
+        }
+
+        let computation = UnitPosComputation.to_string();
+        assert!(computation.contains("unit_pos_x + unit_pos_y * cube_dim_x"));
+        assert!(computation.contains("unit_pos_z * (cube_dim_x * cube_dim_y)"));
+        assert!(!computation.contains("= unit_idx;"));
+    }
+
+    #[test]
+    fn staged_scalar_writer_shifts_info_args_past_staging_word() {
+        let kernel = build_phase1_bounds_checked_f32_kernel();
+        let mut compiler: TtCompiler = Default::default();
+        let repr = compiler
+            .compile(
+                kernel,
+                &cubecl_cpp::shared::CompilationOptions::default(),
+                cubecl_core::server::ExecutionMode::Checked,
+                StorageType::Scalar(ElemType::UInt(UIntKind::U32)),
+            )
+            .expect("kernel should compile");
+        let sources =
+            cubecl_cpp::tt_metal::compile::runtime_sources_from_repr_with_page_size_and_staging(
+                &repr, 1, 2048, true,
+            )
+            .expect("TT runtime sources should build")
+            .with_full_input_staging_tiles(2)
+            .with_reader_runtime_args(vec![2]);
+
+        assert!(
+            sources
+                .writer_source
+                .contains("staged_input_tiles = get_arg_val<uint32_t>(7);")
+        );
+        assert!(sources.writer_source.contains("info_arg_offset_words = 8;"));
+    }
+
+    #[test]
+    fn prepare_launch_places_staged_input_tiles_before_runtime_metadata_words() {
+        let kernel = build_phase1_bounds_checked_f32_kernel();
+        let mut compiler: TtCompiler = Default::default();
+        let repr = compiler
+            .compile(
+                kernel,
+                &cubecl_cpp::shared::CompilationOptions::default(),
+                cubecl_core::server::ExecutionMode::Checked,
+                StorageType::Scalar(ElemType::UInt(UIntKind::U32)),
+            )
+            .expect("kernel should compile");
+        let sources =
+            cubecl_cpp::tt_metal::compile::runtime_sources_from_repr_with_page_size_and_staging(
+                &repr, 1, 2048, true,
+            )
+            .expect("TT runtime sources should build")
+            .with_full_input_staging_tiles(2)
+            .with_reader_runtime_args(vec![2]);
+        let resources = vec![
+            make_test_resource(0x100, 24, 4096, vec![2, 2048]),
+            make_test_resource(0x200, 24, 4096, vec![2, 2048]),
+        ];
+        let info = cubecl_runtime::server::MetadataBindingInfo::custom(vec![11, 22]);
+
+        let prepared = prepare_launch(
+            &repr,
+            sources,
+            &resources,
+            &info,
+            CubeCount::Static(1, 1, 1),
+        )
+        .expect("launch should prepare");
+
+        let packed_info_words = bytemuck::cast_slice::<u64, u32>(&info.data).to_vec();
+        assert_eq!(prepared.sources.writer_runtime_args[..5], [6, 1, 1, 1, 2]);
+        assert_eq!(prepared.sources.writer_runtime_args[5..], packed_info_words);
+    }
+
+    #[test]
+    fn effective_dispatch_unit_size_uses_logical_bytes_per_launched_unit() {
+        use cubecl_runtime::server::CubeDim;
+
+        let mut kernel = build_empty_kernel(0, 1);
+        kernel.cube_dim = CubeDim::new_2d(16, 16);
+        let mut compiler: TtCompiler = Default::default();
+        let mut repr = compiler
+            .compile(
+                kernel,
+                &cubecl_cpp::shared::CompilationOptions::default(),
+                cubecl_core::server::ExecutionMode::Checked,
+                StorageType::Scalar(ElemType::UInt(UIntKind::U32)),
+            )
+            .expect("kernel should compile");
+        let vector_item = cubecl_cpp::shared::Item::new(cubecl_cpp::shared::Elem::F32, 8, true);
+        repr.buffers[0].item = vector_item;
+        repr.items.insert(vector_item);
+        let resources = vec![make_test_resource(0x100, 16 * 16 * 4, 4096, vec![1, 4096])];
+        let info = cubecl_runtime::server::MetadataBindingInfo::custom(vec![]);
+
+        let dispatch_unit_size =
+            crate::compute::context::effective_generic_dispatch_unit_size_bytes(
+                &repr,
+                &resources,
+                &info,
+                &CubeCount::Static(1, 1, 1),
+            );
+
+        assert_eq!(dispatch_unit_size, Some(4));
+    }
+
+    #[test]
+    fn runtime_sources_accept_dispatch_unit_size_override_for_vectorized_outputs() {
+        use cubecl_runtime::server::CubeDim;
+
+        let mut kernel = build_empty_kernel(0, 1);
+        kernel.cube_dim = CubeDim::new_2d(16, 16);
+        let mut compiler: TtCompiler = Default::default();
+        let mut repr = compiler
+            .compile(
+                kernel,
+                &cubecl_cpp::shared::CompilationOptions::default(),
+                cubecl_core::server::ExecutionMode::Checked,
+                StorageType::Scalar(ElemType::UInt(UIntKind::U32)),
+            )
+            .expect("kernel should compile");
+        let vector_item = cubecl_cpp::shared::Item::new(cubecl_cpp::shared::Elem::F32, 8, true);
+        repr.buffers[0].item = vector_item;
+        repr.items.insert(vector_item);
+        let sources = cubecl_cpp::tt_metal::compile::runtime_sources_from_repr_with_page_size_and_staging_and_unit_size(
+            &repr,
+            1,
+            4096,
+            false,
+            Some(4),
+        )
+        .expect("TT runtime sources should build");
+
+        assert_eq!(sources.unit_item_size_bytes, 4);
+        assert!(
+            sources
+                .writer_source
+                .contains("constexpr uint32_t tile_units = 1024;")
+        );
     }
 
     #[test]

@@ -11,8 +11,10 @@ use cubecl_runtime::{
 };
 use libtt_metal_cxx::{MeshBuffer, MeshDevice, MeshWorkload, Program};
 use std::collections::HashMap;
+use std::time::Instant;
 
 use crate::{
+    compute::profile,
     compute::storage::gpu::TtStorage,
     runtime::{TT_DEFAULT_BUFFER_PAGE_SIZE_BYTES, TT_MEMORY_ALIGNMENT},
 };
@@ -198,13 +200,17 @@ impl Stream {
         }
         let mut ops = core::mem::take(&mut self.pending_ops);
         let batch_size = ops.len();
+        let mut workload_ops = 0usize;
+        let mut write_ops = 0usize;
         self.progress.max_pending_batch_size = self.progress.max_pending_batch_size.max(batch_size);
         self.progress.submit_calls = self.progress.submit_calls.saturating_add(1);
         let mut max_seq = self.last_submitted_seq;
+        let submit_started = Instant::now();
 
         for op in ops.drain(..) {
             match op {
                 PendingOp::Workload { seq, mut workload } => {
+                    workload_ops = workload_ops.saturating_add(1);
                     max_seq = max_seq.max(seq);
                     if workload.program_count() == 0 {
                         continue;
@@ -221,6 +227,7 @@ impl Stream {
                     storage_id,
                     staged,
                 } => {
+                    write_ops = write_ops.saturating_add(1);
                     max_seq = max_seq.max(seq);
                     let mesh_ptr = self.mesh_ptr;
                     let mesh_buffer_ptr =
@@ -239,6 +246,12 @@ impl Stream {
         }
 
         self.last_submitted_seq = max_seq;
+        profile::record_pending_submit(
+            batch_size,
+            workload_ops,
+            write_ops,
+            submit_started.elapsed(),
+        );
         Ok(())
     }
 
@@ -247,6 +260,7 @@ impl Stream {
             return Ok(());
         }
 
+        let wait_started = Instant::now();
         self.fence_value = self.fence_value.wrapping_add(1);
         self.fence_staging[..4].copy_from_slice(&self.fence_value.to_le_bytes());
         let fence_buffer = self
@@ -265,6 +279,7 @@ impl Stream {
         self.last_completed_seq = self.last_submitted_seq;
         self.progress.completed = self.last_completed_seq;
         self.progress.completion_waits = self.progress.completion_waits.saturating_add(1);
+        profile::record_completion_wait(wait_started.elapsed());
         Ok(())
     }
 

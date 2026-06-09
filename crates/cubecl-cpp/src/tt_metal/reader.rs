@@ -147,6 +147,7 @@ pub fn generate_scalar_reader_source(num_inputs: u32, full_input_staging: bool) 
     let num_tiles_idx = num_inputs;
     let start_tile_idx = num_tiles_idx + 1;
     let staging_tiles_idx = start_tile_idx + 1;
+    let staging_page_bytes_idx = staging_tiles_idx + 1;
     src.push_str(&format!(
         "    uint32_t num_tiles = get_arg_val<uint32_t>({});\n",
         num_tiles_idx
@@ -159,6 +160,10 @@ pub fn generate_scalar_reader_source(num_inputs: u32, full_input_staging: bool) 
         src.push_str(&format!(
             "    uint32_t staged_input_tiles = get_arg_val<uint32_t>({});\n",
             staging_tiles_idx
+        ));
+        src.push_str(&format!(
+            "    uint32_t staged_input_page_bytes = get_arg_val<uint32_t>({});\n",
+            staging_page_bytes_idx
         ));
     }
     src.push('\n');
@@ -197,10 +202,6 @@ pub fn generate_scalar_reader_source(num_inputs: u32, full_input_staging: bool) 
 ",
         );
         src.push_str(
-            "    uint32_t page_bytes_in0 = get_tile_size(cb_in0);
-",
-        );
-        src.push_str(
             "    for (uint32_t staged_tile = 0; staged_tile < staged_input_tiles; ++staged_tile) {
 ",
         );
@@ -208,7 +209,7 @@ pub fn generate_scalar_reader_source(num_inputs: u32, full_input_staging: bool) 
             "        uint64_t src_noc_addr_in0 = a0.get_noc_addr(staged_tile);
 ",
         );
-        src.push_str("        noc_async_read(src_noc_addr_in0, l1_addr_in0_base + staged_tile * page_bytes_in0, page_bytes_in0);
+        src.push_str("        noc_async_read(src_noc_addr_in0, l1_addr_in0_base + staged_tile * staged_input_page_bytes, staged_input_page_bytes);
 ");
         src.push_str(
             "    }

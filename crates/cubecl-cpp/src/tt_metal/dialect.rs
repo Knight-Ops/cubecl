@@ -187,13 +187,13 @@ impl<Wmma: DialectWmmaCompiler<Self>> DialectCubeBuiltins<Self> for TtMetalDiale
         write!(f, "absolute_pos")
     }
     fn compile_absolute_pos_x(f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "i")
+        write!(f, "absolute_pos_x")
     }
     fn compile_absolute_pos_y(f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "0")
+        write!(f, "absolute_pos_y")
     }
     fn compile_absolute_pos_z(f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "0")
+        write!(f, "absolute_pos_z")
     }
 
     fn compile_cube_count_base_name(f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -250,7 +250,15 @@ impl<Wmma: DialectWmmaCompiler<Self>> DialectCubeBuiltins<Self> for TtMetalDiale
     fn compile_unit_pos_computation(f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let variable = Variable::<Self>::UnitPos;
         let ty = variable.item();
-        writeln!(f, "{ty} {variable} = unit_idx;")
+        let cube_dim_x = Variable::<Self>::CubeDimX;
+        let cube_dim_y = Variable::<Self>::CubeDimY;
+        let unit_pos_x = Variable::<Self>::UnitPosX;
+        let unit_pos_y = Variable::<Self>::UnitPosY;
+        let unit_pos_z = Variable::<Self>::UnitPosZ;
+        writeln!(
+            f,
+            "{ty} {variable} = {unit_pos_x} + {unit_pos_y} * {cube_dim_x} + {unit_pos_z} * ({cube_dim_x} * {cube_dim_y});"
+        )
     }
 
     fn compile_unit_pos(f: &mut fmt::Formatter<'_>) -> fmt::Result {

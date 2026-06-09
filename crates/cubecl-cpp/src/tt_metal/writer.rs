@@ -737,7 +737,7 @@ pub(crate) fn generate_scalar_writer_source(
     analysis: &TtKernelAnalysis,
     full_input_staging: bool,
 ) -> String {
-    let tile_units = (analysis.tile_size_bytes as usize / analysis.unit_item.size()).max(1) as u32;
+    let tile_units = (analysis.tile_size_bytes / analysis.unit_item_size_bytes.max(1)).max(1);
     let mut src = String::new();
     let num_tiles_idx = analysis.num_outputs;
     let start_tile_idx = num_tiles_idx + 1;
@@ -746,6 +746,7 @@ pub(crate) fn generate_scalar_writer_source(
     let cube_count_y_idx = num_tiles_idx + 4;
     let cube_count_z_idx = num_tiles_idx + 5;
     let static_arg_offset_words = num_tiles_idx + 6;
+    let info_arg_offset_words = static_arg_offset_words + u32::from(full_input_staging);
     let dynamic_meta_offset_words =
         (repr.info.dynamic_meta_offset / core::mem::size_of::<u32>()) as u32;
 
@@ -856,7 +857,7 @@ pub(crate) fn generate_scalar_writer_source(
         let _ = writeln!(src, "    info_st info = {{}};");
         let _ = writeln!(
             src,
-            "    constexpr uint32_t info_arg_offset_words = {static_arg_offset_words};"
+            "    constexpr uint32_t info_arg_offset_words = {info_arg_offset_words};"
         );
         let _ = writeln!(
             src,
@@ -884,7 +885,7 @@ pub(crate) fn generate_scalar_writer_source(
         let _ = writeln!(
             src,
             "    constexpr uint32_t dynamic_meta_arg_offset_words = {};",
-            static_arg_offset_words + dynamic_meta_offset_words,
+            info_arg_offset_words + dynamic_meta_offset_words,
         );
         let _ = writeln!(
             src,
@@ -939,9 +940,6 @@ pub(crate) fn generate_scalar_writer_source(
         .instructions
         .iter()
         .any(|instruction| instruction.to_string().contains("return;"));
-    if has_terminate_return {
-        let _ = writeln!(src, "    bool terminate_kernel = false;");
-    }
     for output_idx in 0..analysis.num_outputs {
         let _ = writeln!(src, "        cb_reserve_back(cb_out{output_idx}, 1);");
     }
@@ -975,11 +973,12 @@ pub(crate) fn generate_scalar_writer_source(
     let mut read_idx = 0u32;
     let mut write_idx = 0u32;
     for (binding_index, binding) in repr.buffers.iter().enumerate() {
+        let page_items = (analysis.tile_size_bytes as usize / binding.item.size()).max(1);
         if output_binding_indices.contains(&binding_index) {
             let _ = writeln!(
                 src,
-                "        {}* buffer_{} = reinterpret_cast<{}*>(get_write_ptr(cb_out{})) - global_tile_idx * tile_units;",
-                binding.item, binding.id, binding.item, write_idx,
+                "        {}* buffer_{} = reinterpret_cast<{}*>(get_write_ptr(cb_out{})) - global_tile_idx * {};",
+                binding.item, binding.id, binding.item, write_idx, page_items,
             );
             write_idx += 1;
         } else {
@@ -992,8 +991,8 @@ pub(crate) fn generate_scalar_writer_source(
             } else {
                 let _ = writeln!(
                     src,
-                    "        const {}* buffer_{} = reinterpret_cast<const {}*>(get_read_ptr(cb_in{})) - global_tile_idx * tile_units;",
-                    binding.item, binding.id, binding.item, read_idx,
+                    "        const {}* buffer_{} = reinterpret_cast<const {}*>(get_read_ptr(cb_in{})) - global_tile_idx * {};",
+                    binding.item, binding.id, binding.item, read_idx, page_items,
                 );
             }
             read_idx += 1;
@@ -1031,22 +1030,17 @@ pub(crate) fn generate_scalar_writer_source(
     emit_builtin_locals(&mut src, &repr.flags.indexes);
     emit_local_array_declarations(&mut src, repr);
     if has_terminate_return {
+        let _ = writeln!(src, "            [&]() {{");
         for rendered in &rendered_instructions {
-            let rendered = rendered.replace(
-                "return;",
-                "terminate_kernel = true; goto tt_writer_finish_tile;",
-            );
             let _ = write!(src, "            {rendered}");
         }
+        let _ = writeln!(src, "            }}();");
     } else {
         for rendered in &rendered_instructions {
             let _ = write!(src, "            {rendered}");
         }
     }
     let _ = writeln!(src, "        }}");
-    if has_terminate_return {
-        let _ = writeln!(src, "tt_writer_finish_tile:");
-    }
 
     for output_idx in 0..analysis.num_outputs {
         let _ = writeln!(src, "        cb_push_back(cb_out{output_idx}, 1);");
@@ -1080,9 +1074,6 @@ pub(crate) fn generate_scalar_writer_source(
     }
     for input_idx in 0..analysis.num_inputs {
         let _ = writeln!(src, "        cb_pop_front(cb_in{input_idx}, 1);");
-    }
-    if has_terminate_return {
-        let _ = writeln!(src, "        if (terminate_kernel) break;");
     }
     let _ = writeln!(src, "    }}");
     let _ = writeln!(src, "}}");
@@ -1188,9 +1179,12 @@ fn emit_shared_memory_declarations(src: &mut String, repr: &ComputeKernel<TtMeta
 }
 
 fn emit_builtin_locals(src: &mut String, indexes: &crate::shared::CubeIndexFlags) {
-    let needs_cube_pos_components = indexes.cube_pos || indexes.cube_pos_tuple;
-    let needs_unit_pos_components = indexes.unit_pos_tuple;
-    let needs_flattened_positions = needs_cube_pos_components
+    let needs_absolute_pos_components = indexes.absolute_pos_tuple;
+    let needs_cube_pos_components =
+        needs_absolute_pos_components || indexes.cube_pos || indexes.cube_pos_tuple;
+    let needs_unit_pos_components = needs_absolute_pos_components || indexes.unit_pos_tuple;
+    let needs_flattened_positions = needs_absolute_pos_components
+        || needs_cube_pos_components
         || needs_unit_pos_components
         || indexes.unit_pos
         || indexes.absolute_pos
@@ -1211,9 +1205,30 @@ fn emit_builtin_locals(src: &mut String, indexes: &crate::shared::CubeIndexFlags
             src,
             "            uint32_t unit_pos = cube_units == 0 ? 0 : (unit_idx % cube_units);"
         );
-    }
-
-    if needs_cube_pos_components || needs_unit_pos_components {
+        let _ = writeln!(
+            src,
+            "            uint32_t total_units_x = cube_count_x * cube_dim_x;"
+        );
+        let _ = writeln!(
+            src,
+            "            uint32_t total_units_y = cube_count_y * cube_dim_y;"
+        );
+        let _ = writeln!(
+            src,
+            "            uint32_t total_units_xy = total_units_x * total_units_y;"
+        );
+        let _ = writeln!(
+            src,
+            "            uint32_t absolute_pos_x = total_units_x == 0 ? 0 : (unit_idx % total_units_x);"
+        );
+        let _ = writeln!(
+            src,
+            "            uint32_t absolute_pos_y = (total_units_x == 0 || total_units_y == 0) ? 0 : ((unit_idx / total_units_x) % total_units_y);"
+        );
+        let _ = writeln!(
+            src,
+            "            uint32_t absolute_pos_z = (total_units_x == 0 || total_units_y == 0) ? 0 : (unit_idx / total_units_xy);"
+        );
         let _ = writeln!(
             src,
             "            uint32_t cube_pos_x = cube_count_x == 0 ? 0 : (flat_cube_pos % cube_count_x);"

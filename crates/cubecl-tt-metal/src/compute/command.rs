@@ -1,5 +1,6 @@
 use crate::compute::{
-    context::{PreparedLaunch, TtContext},
+    context::{PreparedLaunch, TensorOutputBridgePlan, TtContext},
+    profile,
     storage::gpu::{TtBufferLayout, TtResource},
     stream::TtStreamBackend,
 };
@@ -15,7 +16,7 @@ use cubecl_runtime::logging::ServerLogger;
 use cubecl_runtime::memory_management::ManagedMemoryHandle;
 use cubecl_runtime::server::CubeCount;
 use cubecl_runtime::stream::ResolvedStreams;
-use std::sync::Arc;
+use std::{sync::Arc, time::Instant};
 
 use cubecl_cpp::tt_metal::TtKernelSources;
 
@@ -46,6 +47,22 @@ struct TtTiledLaunchBridge {
     data_format_tt: u8,
     _inputs: Vec<TtTiledTempBuffer>,
     outputs: Vec<TtTiledOutputBridge>,
+}
+
+#[derive(Debug)]
+struct TtTensorOutputLaunchBridge {
+    temp: TtTiledTempBuffer,
+    original: TtResource,
+    logical_shape: Vec<usize>,
+    logical_strides: Vec<usize>,
+    logical_elem_size_bytes: usize,
+    padded_row_bytes: usize,
+}
+
+#[derive(Debug)]
+enum TtLaunchBridge {
+    Tiled(TtTiledLaunchBridge),
+    TensorOutput(TtTensorOutputLaunchBridge),
 }
 
 pub(crate) struct Command<'a> {
@@ -274,8 +291,11 @@ impl<'a> Command<'a> {
         &mut self,
         prepared: PreparedLaunch,
         resources: &[TtResource],
-    ) -> Result<(PreparedLaunch, Option<TtTiledLaunchBridge>), LaunchError> {
+    ) -> Result<(PreparedLaunch, Option<TtLaunchBridge>), LaunchError> {
         if !prepared.sources.requires_tiled_io() {
+            if let Some(plan) = prepared.tensor_output_bridge.clone() {
+                return self.bridge_tensor_output_launch(prepared, resources, plan);
+            }
             return Ok((prepared, None));
         }
         if resources.len() != prepared.bindings.len() {
@@ -369,6 +389,7 @@ impl<'a> Command<'a> {
             input_addrs,
             output_addrs,
             bindings: prepared.bindings,
+            tensor_output_bridge: prepared.tensor_output_bridge,
         };
         let bridge = TtTiledLaunchBridge {
             row_major_rows,
@@ -378,67 +399,177 @@ impl<'a> Command<'a> {
             _inputs: temp_inputs,
             outputs: temp_outputs,
         };
-        Ok((adapted, Some(bridge)))
+        Ok((adapted, Some(TtLaunchBridge::Tiled(bridge))))
     }
 
-    fn finish_tiled_launch_bridge(
+    fn bridge_tensor_output_launch(
         &mut self,
-        bridge: TtTiledLaunchBridge,
-    ) -> Result<(), LaunchError> {
-        for output in bridge.outputs {
-            let mut staged = vec![0u8; output.temp.mesh_buffer.size() as usize];
-            let read_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                self.mesh
-                    .read_mesh_buffer_with_mode(&output.temp.mesh_buffer, &mut staged, true)
-            }));
-            match read_result {
-                Ok(Ok(())) => {}
-                Ok(Err(e)) => {
-                    return Err(LaunchError::Unknown {
-                        reason: format!("TT tiled output read failed: {}", e.what()),
-                        backtrace: BackTrace::capture(),
-                    });
-                }
-                Err(_) => {
-                    return Err(LaunchError::Unknown {
-                        reason: "TT tiled output read panicked".into(),
-                        backtrace: BackTrace::capture(),
-                    });
-                }
-            }
+        prepared: PreparedLaunch,
+        resources: &[TtResource],
+        plan: TensorOutputBridgePlan,
+    ) -> Result<(PreparedLaunch, Option<TtLaunchBridge>), LaunchError> {
+        let Some(resource) =
+            prepared
+                .bindings
+                .iter()
+                .zip(resources.iter())
+                .find_map(|(binding, resource)| {
+                    matches!(
+                        binding.visibility,
+                        cubecl_runtime::kernel::Visibility::ReadWrite
+                    )
+                    .then_some(resource)
+                })
+        else {
+            return Err(LaunchError::Unknown {
+                reason: "TT tensor-output bridge requires one writable output resource".into(),
+                backtrace: BackTrace::capture(),
+            });
+        };
 
-            let untilized = if is_native_block_float_format(bridge.data_format_tt) {
-                libtt_metal_cxx::untilize_with_data_format(
-                    &staged,
-                    bridge.row_major_rows,
-                    bridge.row_major_cols,
-                    bridge.data_format_tt,
-                )
-            } else {
-                libtt_metal_cxx::untilize(
-                    &staged,
-                    bridge.row_major_rows,
-                    bridge.row_major_cols,
-                    bridge.logical_elem_size_bytes,
-                )
+        let temp = self.create_temp_tiled_buffer(
+            &vec![0u8; plan.temp_size_bytes as usize],
+            u64::from(prepared.sources.tile_size_bytes),
+        )?;
+
+        let adapted = PreparedLaunch {
+            sources: prepared.sources.clone().with_compile_args(
+                prepared.sources.reader_compile_args.clone(),
+                temp.compile_args.clone(),
+            ),
+            input_addrs: prepared.input_addrs,
+            output_addrs: vec![temp.address],
+            bindings: prepared.bindings,
+            tensor_output_bridge: prepared.tensor_output_bridge,
+        };
+        let bridge = TtTensorOutputLaunchBridge {
+            temp,
+            original: resource.clone(),
+            logical_shape: plan.logical_shape,
+            logical_strides: plan.logical_strides,
+            logical_elem_size_bytes: plan.logical_elem_size_bytes,
+            padded_row_bytes: plan.padded_row_bytes,
+        };
+
+        Ok((adapted, Some(TtLaunchBridge::TensorOutput(bridge))))
+    }
+
+    fn finish_launch_bridge(&mut self, bridge: TtLaunchBridge) -> Result<(), LaunchError> {
+        match bridge {
+            TtLaunchBridge::Tiled(bridge) => {
+                for output in bridge.outputs {
+                    let mut staged = vec![0u8; output.temp.mesh_buffer.size() as usize];
+                    let read_result =
+                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            self.mesh.read_mesh_buffer_with_mode(
+                                &output.temp.mesh_buffer,
+                                &mut staged,
+                                true,
+                            )
+                        }));
+                    match read_result {
+                        Ok(Ok(())) => {}
+                        Ok(Err(e)) => {
+                            return Err(LaunchError::Unknown {
+                                reason: format!("TT tiled output read failed: {}", e.what()),
+                                backtrace: BackTrace::capture(),
+                            });
+                        }
+                        Err(_) => {
+                            return Err(LaunchError::Unknown {
+                                reason: "TT tiled output read panicked".into(),
+                                backtrace: BackTrace::capture(),
+                            });
+                        }
+                    }
+
+                    let untilized = if is_native_block_float_format(bridge.data_format_tt) {
+                        libtt_metal_cxx::untilize_with_data_format(
+                            &staged,
+                            bridge.row_major_rows,
+                            bridge.row_major_cols,
+                            bridge.data_format_tt,
+                        )
+                    } else {
+                        libtt_metal_cxx::untilize(
+                            &staged,
+                            bridge.row_major_rows,
+                            bridge.row_major_cols,
+                            bridge.logical_elem_size_bytes,
+                        )
+                    }
+                    .map_err(map_tt_exception_to_launch(
+                        "TT tiled output untilize failed",
+                    ))?;
+                    if untilized.len() < output.logical_size_bytes {
+                        return Err(LaunchError::Unknown {
+                            reason: format!(
+                                "TT tiled output bridge produced {} bytes, expected at least {}",
+                                untilized.len(),
+                                output.logical_size_bytes
+                            ),
+                            backtrace: BackTrace::capture(),
+                        });
+                    }
+                    self.write_resource_bytes(
+                        &output.original,
+                        &untilized[..output.logical_size_bytes],
+                    )
+                    .map_err(map_io_err_to_launch(
+                        "TT tiled output write-back to logical buffer failed",
+                    ))?;
+                }
             }
-            .map_err(map_tt_exception_to_launch(
-                "TT tiled output untilize failed",
-            ))?;
-            if untilized.len() < output.logical_size_bytes {
-                return Err(LaunchError::Unknown {
-                    reason: format!(
-                        "TT tiled output bridge produced {} bytes, expected at least {}",
-                        untilized.len(),
-                        output.logical_size_bytes
-                    ),
-                    backtrace: BackTrace::capture(),
-                });
+            TtLaunchBridge::TensorOutput(bridge) => {
+                let mut staged = vec![0u8; bridge.temp.mesh_buffer.size() as usize];
+                mesh_read_buffer(
+                    self.mesh,
+                    &bridge.temp.mesh_buffer,
+                    &mut staged,
+                    "TT tensor-output bridge read failed",
+                    true,
+                )
+                .map_err(map_io_err_to_launch("TT tensor-output bridge read failed"))?;
+
+                if bridge.logical_shape.len() != 2
+                    || bridge.logical_strides.len() != 2
+                    || bridge.logical_strides[1] != 1
+                    || bridge.logical_strides[0] < bridge.logical_shape[1]
+                {
+                    return Err(LaunchError::Unknown {
+                        reason: "TT tensor-output bridge requires 2D pitched row-major strides"
+                            .into(),
+                        backtrace: BackTrace::capture(),
+                    });
+                }
+
+                let logical_rows = bridge.logical_shape[0];
+                let logical_row_bytes =
+                    bridge.logical_shape[1].saturating_mul(bridge.logical_elem_size_bytes);
+                let dst_row_bytes =
+                    bridge.logical_strides[0].saturating_mul(bridge.logical_elem_size_bytes);
+                let mut compact = vec![0u8; bridge.original.size as usize];
+
+                for row in 0..logical_rows {
+                    let src_start = row.saturating_mul(bridge.padded_row_bytes);
+                    let src_end = src_start.saturating_add(logical_row_bytes);
+                    let dst_start = row.saturating_mul(dst_row_bytes);
+                    let dst_end = dst_start.saturating_add(logical_row_bytes);
+                    if src_end > staged.len() || dst_end > compact.len() {
+                        return Err(LaunchError::Unknown {
+                            reason: "TT tensor-output bridge row compaction exceeded buffer bounds"
+                                .into(),
+                            backtrace: BackTrace::capture(),
+                        });
+                    }
+                    compact[dst_start..dst_end].copy_from_slice(&staged[src_start..src_end]);
+                }
+
+                self.write_resource_bytes(&bridge.original, &compact)
+                    .map_err(map_io_err_to_launch(
+                        "TT tensor-output bridge write-back to logical buffer failed",
+                    ))?;
             }
-            self.write_resource_bytes(&output.original, &untilized[..output.logical_size_bytes])
-                .map_err(map_io_err_to_launch(
-                    "TT tiled output write-back to logical buffer failed",
-                ))?;
         }
         Ok(())
     }
@@ -568,10 +699,17 @@ impl<'a> Command<'a> {
         info: &cubecl_runtime::server::MetadataBindingInfo,
         logger: Arc<ServerLogger>,
     ) -> Result<(), LaunchError> {
+        let prepare_started = Instant::now();
         let prepared =
             self.ctx
                 .prepare_cube_task_launch(cube_kernel, mode, count, resources, info)?;
+        profile::record_prepare(prepare_started.elapsed());
+
+        let bridge_started = Instant::now();
         let (prepared, bridge) = self.bridge_prepared_launch(prepared, resources)?;
+        profile::record_bridge(bridge_started.elapsed());
+
+        let compile_started = Instant::now();
         let compiled = self.ctx.compile_kernel(
             self.mesh,
             &prepared.sources,
@@ -580,17 +718,22 @@ impl<'a> Command<'a> {
             logger,
             true,
         )?;
+        profile::record_compile(compile_started.elapsed());
         let target = self.launch_target_for_resources(resources)?;
 
         if let Some(bridge) = bridge {
+            profile::record_kernel_cube_launch(false);
             self.flush_current_pending_workload()?;
             let mut workload = libtt_metal_cxx::MeshWorkload::new();
             self.add_program_to_workload(&mut workload, compiled.program, target)?;
+            let submit_started = Instant::now();
             catch_launch_panic("enqueue_workload failed", || {
                 self.mesh.enqueue_workload(&mut workload, false)
             })?;
-            self.finish_tiled_launch_bridge(bridge)?;
+            profile::record_immediate_submit(submit_started.elapsed());
+            self.finish_launch_bridge(bridge)?;
         } else {
+            profile::record_kernel_cube_launch(true);
             match target {
                 TtLaunchTarget::FullMesh => {
                     let seq = self
